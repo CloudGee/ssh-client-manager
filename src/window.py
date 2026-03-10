@@ -2603,35 +2603,58 @@ class MainWindow(Adw.ApplicationWindow):
         insert_body("")
 
         insert_h2("Connection Management")
-        insert_body("• SSH, SFTP, RDP, VNC protocols supported")
+        insert_body("• SSH, SFTP, RDP, and VNC protocols supported")
         insert_body(
-            "• Organize connections into groups and subgroups (use / for nesting)"
+            "• Organize connections into groups and subgroups — use / in the group field for nesting (e.g. Work/Dev)"
         )
         insert_body(
-            "• Right-click sidebar for context menu: connect, edit, duplicate, delete"
+            "• Drag-and-drop connections or entire groups onto other groups to reorganize them; drag to empty space to move to root level"
         )
-        insert_body("• Mark connections as favorites for quick access")
-        insert_body("• Add tags (comma-separated) for categorization")
         insert_body(
-            "• Open After: set connection dependencies (auto-connect prerequisite first)"
+            "• Right-click sidebar for context menu: connect, edit, duplicate, delete, open SFTP"
         )
-        insert_body("• Credentials are encrypted and stored securely")
+        insert_body("• Favorites — mark connections for quick access")
         insert_body(
-            "• Deleting a group: choose to keep connections (become ungrouped) or delete all"
+            "• Tags — add comma-separated tags for categorization and filtering"
+        )
+        insert_body(
+            "• Open After — set a prerequisite connection that auto-connects first"
+        )
+        insert_body("• Credentials are AES-256 encrypted and stored locally")
+        insert_body(
+            "• Delete a group: choose to keep its connections (move to Ungrouped) or delete all"
+        )
+        insert_body("")
+        insert_h3("Group Ordering")
+        insert_body(
+            "• Click the Sort Groups button (↕) in the sidebar toolbar to open the group ordering dialog"
+        )
+        insert_body(
+            "• Groups are shown in a hierarchical list — select a group and use ↑ / ↓ to reorder it within its level"
+        )
+        insert_body(
+            "• The display order is saved to your configuration and persisted across sessions"
+        )
+        insert_body("• Click Reset to A-Z to restore alphabetical ordering")
+        insert_body(
+            "• Groups not in the saved order list are placed at the end alphabetically"
         )
         insert_body("")
 
         insert_h2("Terminal Features")
         insert_h3("Split Terminals")
         insert_body(
-            "• Use the Split menu button in the header bar for directional splits"
+            "• Use the Split menu button in the header bar to split in any direction"
         )
         insert_body(
             "• Split Left / Right / Up / Down — places new pane on the chosen side"
         )
-        insert_body("• Right-click a tab for the context menu with split options")
+        insert_body("• Right-click a tab for context menu with split options")
         insert_body("• Click Unsplit All to restore single-pane layout")
-        insert_body("• Tab dragging reorders tabs within a notebook (no drag-to-split)")
+        insert_body("• Tabs can be reordered by dragging within a notebook")
+        insert_body(
+            "• Tab switch auto-focus — clicking any connection tab (including the same tab repeatedly, in split panes, etc.) always focuses the terminal for keyboard input"
+        )
         insert_body("")
         insert_h3("Font Zoom")
         insert_body("• Ctrl/⌘ + =  →  Zoom in")
@@ -2642,7 +2665,7 @@ class MainWindow(Adw.ApplicationWindow):
         insert_h3("Copy & Paste")
         insert_body("• macOS: ⌘+C / ⌘+V")
         insert_body("• Linux: Ctrl+Shift+C / Ctrl+Shift+V")
-        insert_body("• Middle-click: paste clipboard (or copy selection then paste)")
+        insert_body("• Middle-click to paste selection")
         insert_body("")
 
         insert_h2("Keyboard Shortcuts")
@@ -2666,145 +2689,257 @@ class MainWindow(Adw.ApplicationWindow):
 
         insert_h2("SFTP File Browser")
         insert_body(
-            "• Right-click an SSH connection → Open SFTP to browse remote files"
+            "• Right-click an SSH/SFTP connection in the sidebar → Open SFTP to browse remote files"
         )
-        insert_body("• Navigate with toolbar: Back, Up, Home, Refresh")
-        insert_body("• Double-click a file to download, double-click a folder to enter")
+        insert_body("• Toolbar navigation: Back, Up, Home, Refresh")
         insert_body(
-            "• Upload: click Upload button in toolbar or drag files from your file manager"
+            "• Double-click a folder to enter it; double-click a file to download it to ~/Downloads/"
         )
         insert_body(
-            "• Right-click for context menu: download, rename, delete, upload, new folder"
+            "• Upload: click the Upload button in the toolbar, or right-click → Upload"
         )
-        insert_body("• Download by dragging files out from the SFTP browser")
+        insert_body("• Download: double-click a file, or right-click → Download")
+        insert_body(
+            "• Right-click remote files/folders for the full context menu: Download, Upload, Rename, Delete, New Folder"
+        )
+        insert_body(
+            "• Sort columns by clicking column headers (Name, Size, Modified, Permissions)"
+        )
+        insert_body("• Upload and download progress is shown in the status bar")
         insert_body("")
 
         insert_h2("Cluster Mode")
-        insert_body("• Click the Cluster button in the header bar")
-        insert_body("• Select which terminals to broadcast to")
-        insert_body("• Type once, send to all selected terminals simultaneously")
-        insert_body("• Great for running the same command on multiple servers")
+        insert_body(
+            "• Click the Cluster button in the header bar to enter cluster mode"
+        )
+        insert_body(
+            "• Select which open terminals to broadcast to using the checkboxes"
+        )
+        insert_body(
+            "• Type once → keystroke is sent to all selected terminals simultaneously"
+        )
+        insert_body("• Useful for running the same command on multiple servers at once")
         insert_body("")
 
         insert_h2("Command Snippets")
-        insert_body("• Access via menu or Ctrl+Shift+S / ⌘+Shift+S")
+        insert_body("• Access via the menu or Ctrl+Shift+S / ⌘+Shift+S")
         insert_body(
-            "• Save frequently used commands with name, category, and description"
+            "• Save frequently used commands with a name, category, and optional description"
         )
-        insert_body("• Click Send to send directly to the active terminal")
-        insert_body("• Click Broadcast to send to ALL open terminals (batch send)")
-        insert_body("• Click Edit to modify an existing snippet")
-        insert_body("• Click Copy to copy to clipboard")
+        insert_body("• Send — send the snippet directly to the active terminal")
+        insert_body("• Broadcast — send to all open terminals at once")
+        insert_body("• Edit — modify an existing snippet")
+        insert_body("• Copy — copy command to clipboard")
+        insert_body(
+            "• Export / Import snippets using the buttons in the snippet window"
+        )
         insert_body("")
         insert_h3("Variable Support")
-        insert_body("• Use {{variable_name}} syntax in commands for dynamic values")
+        insert_body("• Use {{variable_name}} syntax for dynamic values")
         insert_body("• Example: ssh {{user}}@{{host}} -p {{port}}")
         insert_body(
-            "• When sending or copying, you'll be prompted to fill in each variable"
+            "• When sending or copying, a dialog prompts to fill in each variable before the command is dispatched"
         )
-        insert_body("• Export / Import snippets via the snippet window buttons")
         insert_body("")
 
-        insert_h2("Advanced Features")
-        insert_h3("Port Forwarding")
+        insert_h2("Session Recording")
         insert_body(
-            "• Configure in connection properties: Local (-L), Remote (-R), Dynamic (-D)"
-        )
-        insert_body("• Example: Local 8080 → remote-host:80")
-        insert_body("")
-        insert_h3("Jump Hosts (ProxyJump)")
-        insert_body("• Set in connection properties: e.g. user@jumphost")
-        insert_body("• Multiple hops: user@host1,user@host2")
-        insert_body("• ProxyCommand: paste full command like ssh user@jump -W %h:%p")
-        insert_body("")
-        insert_h3("Global Passphrases")
-        insert_body(
-            "• Set up to 5 global passphrases in Preferences → Global Passphrases"
+            "• Click the Record button (circle icon) in the header bar to start/stop recording the current terminal"
         )
         insert_body(
-            "• These are tried automatically after connection-specific passphrases"
+            "• Also available via right-click a terminal → Start / Stop Recording"
+        )
+        insert_body("• The button turns red while recording; the tab title shows [REC]")
+        insert_body("• Recordings are saved in asciicast v2 format (.cast files)")
+        insert_body(
+            "• The tab title shows [REC] while recording; the status bar shows the output file path"
         )
         insert_body(
-            "• For multi-hop (jump host), each hop retries all passphrases from first to last"
+            "• Default save directory: ~/Documents/SSHClientManager-Recordings (configurable in Preferences → Session Recording)"
         )
-        insert_body(
-            "• When no stored password exists, passphrases are also tried for password prompts"
-        )
-        insert_body("")
-        insert_h3("Post-Login Commands")
-        insert_body("• Add commands in the Commands tab of connection properties")
-        insert_body("• Use ##D=1000 for delays (milliseconds) between commands")
-        insert_body("")
-        insert_h3("Terminal Logging")
-        insert_body(
-            "• Auto-logging can be configured in Preferences → Terminal Logging"
-        )
-        insert_body(
-            "• Logs saved to ~/ssh-logs/ by default (configurable in Preferences)"
-        )
-        insert_body("• Log files are plain text captures of terminal output (.log)")
-        insert_body("")
-        insert_h3("Session Recording")
-        insert_body(
-            "• Right-click a terminal → Start / Stop Recording to record a session"
-        )
-        insert_body(
-            "• Recordings are saved in asciicast v2 format (.cast) for playback"
-        )
-        insert_body(
-            "• The tab shows [REC] while recording is active; status bar shows the file path"
-        )
-        insert_body(
-            "• Default directory: ~/Documents/SSHClientManager-Recordings (configurable in Preferences)"
-        )
+        insert_body("• The directory is created automatically if it doesn't exist")
         insert_body("• View and replay past recordings via Menu → Session Recordings")
-        insert_body("• Playback supports speed control (0.5x–8x) and a progress bar")
-        insert_body("")
-        insert_h3("SSH Key Manager")
-        insert_body("• Open via Menu → SSH Key Manager to view and manage SSH keys")
-        insert_body("• Lists all keys in ~/.ssh/ with type, fingerprint, and comment")
-        insert_body("• Generate new RSA/Ed25519/ECDSA keys directly from the dialog")
-        insert_body("")
-        insert_h3("Auto-Reconnect")
         insert_body(
-            "• When an SSH session disconnects unexpectedly, a reconnect prompt appears"
+            "• Built-in player with Play/Pause, Restart, and speed control (0.5x–8x)"
+        )
+        insert_body(
+            "• Open external .cast files via the Open button in the recordings dialog"
+        )
+        insert_body("")
+
+        insert_h2("SSH Key Manager")
+        insert_body("• Open via Menu → SSH Key Manager")
+        insert_body(
+            "• Lists all SSH keys found in ~/.ssh/ with type, bits, fingerprint, and comment"
+        )
+        insert_body(
+            "• Generate new keys: RSA (2048/4096), Ed25519, ECDSA (256/384/521)"
+        )
+        insert_body(
+            "• Set custom filenames, comments, and optional passphrases for generated keys"
+        )
+        insert_body("• Keys are generated using ssh-keygen on the local system")
+        insert_body("")
+
+        insert_h2("Auto-Reconnect")
+        insert_body(
+            "• When an SSH connection drops unexpectedly, a reconnect prompt appears in the terminal tab"
         )
         insert_body(
             "• Click Reconnect to re-establish the same connection in the same tab"
         )
+        insert_body("• Works for SSH, SFTP, and other terminal-based connections")
+        insert_body("")
+
+        insert_h2("AI Assistant")
+        insert_body("• Toggle the AI panel with the AI button in the header bar")
+        insert_body("")
+        insert_h3("Configuration")
+        insert_body("• Open Preferences → AI Assistant")
+        insert_body("• Provider: OpenAI / Compatible or Anthropic Claude")
+        insert_body("• API Key: your API key (sk-… or sk-ant-…)")
+        insert_body("• API Base URL: endpoint URL — auto-prefixes https:// if missing")
+        insert_body(
+            "• Model: type a model name or click Fetch to list available models from the API"
+        )
+        insert_body(
+            "• System Prompt: custom default system prompt for AI conversations (leave blank for built-in default)"
+        )
+        insert_body(
+            "• Test Connection: click 🔗 Test Connection to verify API key, endpoint, and model are working"
+        )
+        insert_body(
+            "• Works with OpenAI, Claude, Ollama, LM Studio, Groq, and any OpenAI-compatible endpoint"
+        )
+        insert_body("")
+        insert_h3("AI Features")
+        insert_body(
+            "• Markdown rendering — responses display headers, bold, italic, inline code, lists, and fenced code blocks"
+        )
+        insert_body(
+            "• ▶ Paste to terminal — click the Paste button on any code block to insert the command into the active terminal"
+        )
+        insert_body(
+            "• Auto-reference terminal selection — select text in the terminal, type your question, and click Send. The selected text is automatically captured and sent as a 📎 Terminal Reference block alongside your question"
+        )
+        insert_body(
+            "• Manual quoting — you can also manually set the reference; click ✕ on the reference block to clear it before sending"
+        )
+        insert_body(
+            "• Edit & rewind — click ✏️ Edit on any user message to rewind the conversation to that point and re-send a modified message"
+        )
+        insert_body(
+            "• Custom system prompt — configure a default system prompt in Preferences → AI Assistant to tailor the AI's behaviour"
+        )
+        insert_body("")
+
+        insert_h2("Terminal Screenshot")
+        insert_body(
+            "• Right-click a terminal → Copy Screenshot of Selection, or use the context menu"
+        )
+        insert_body(
+            "• Screenshots preserve terminal ANSI colours by parsing VTE HTML export for per-character colour information, then rendering with Cairo/PangoCairo"
+        )
+        insert_body(
+            "• Falls back to WidgetPaintable capture, then plain-text rendering with configured foreground/background colours"
+        )
+        insert_body(
+            "• Configure a watermark in Preferences → Screenshot — the text appears semi-transparently in the bottom-right corner"
+        )
+        insert_body(
+            "• On macOS, the screenshot is copied to the system pasteboard via osascript"
+        )
+        insert_body("")
+
+        insert_h2("Advanced Features")
+        insert_h3("Port Forwarding")
+        insert_body("• Configure in connection properties under the Forwarding tab")
+        insert_body(
+            "• Local (-L): e.g. 8080:remote-host:80 (local 8080 → remote port 80)"
+        )
+        insert_body("• Remote (-R): e.g. 9090:localhost:9090")
+        insert_body("• Dynamic (SOCKS) (-D): e.g. 1080")
+        insert_body("")
+        insert_h3("Jump Hosts (ProxyJump)")
+        insert_body("• Set in connection properties → Advanced tab")
+        insert_body("• Single hop: user@jumphost")
+        insert_body("• Multiple hops: user@host1,user@host2")
+        insert_body("• Custom ProxyCommand: e.g. ssh user@jump -W %h:%p")
+        insert_body("")
+        insert_h3("Global Passphrases")
+        insert_body("• Set in Preferences → Global Passphrases")
+        insert_body("• Up to 5 passphrases tried automatically for every connection")
+        insert_body(
+            "• Order of attempts: 1) connection-specific passphrases, 2) global passphrases, 3) connection password (as fallback for key decryption)"
+        )
+        insert_body(
+            "• For multi-hop jump hosts, each hop retries all passphrases from the beginning"
+        )
+        insert_body(
+            "• If no stored password exists, passphrases are also tried for password prompts"
+        )
+        insert_body("• Also applies to SFTP browser connections (paramiko-based)")
+        insert_body("")
+        insert_h3("Post-Login Commands")
+        insert_body("• Configure in connection properties → Commands tab")
+        insert_body("• Commands are sent to the terminal automatically after login")
+        insert_body(
+            "• Use ##D=1000 on its own line to insert a 1000 ms delay between commands"
+        )
+        insert_body("")
+        insert_h3("Terminal Logging")
+        insert_body("• Configure auto-logging in Preferences → Terminal Logging")
+        insert_body(
+            "• Logs are saved to ~/ssh-logs/ by default (configurable in Preferences)"
+        )
+        insert_body("• Log files are plain text captures of terminal output (.log)")
         insert_body("")
         insert_h3("SSH Config Editor")
-        insert_body("• Edit ~/.ssh/config directly from the app")
-        insert_body("• Access via SSH Config Editor in the menu")
+        insert_body("• Edit ~/.ssh/config directly inside the app")
+        insert_body("• Access via Menu → SSH Config Editor")
+        insert_body("• Supports syntax highlighting; save with Ctrl+S / ⌘+S")
         insert_body("")
 
         insert_h2("Import / Export / Backup")
+        insert_h3("Connection Import / Export")
         insert_body(
-            "• Export all connections (with encrypted credentials) to a JSON file"
+            "• Export all connections (with encrypted credentials) to a .json file"
         )
-        insert_body("• Import with overwrite or append mode")
+        insert_body("• Import with Overwrite (replace all) or Append (merge) mode")
         insert_body(
-            "• All fields are preserved: name, group, protocol, command, credentials,"
-        )
-        insert_body(
-            "  port forwards, jump hosts, tags, favorites, appearance, dependencies"
+            "• All fields preserved: name, group, protocol, command, credentials, port forwards, jump hosts, tags, favorites, appearance, dependencies"
         )
         insert_body("")
         insert_h3("Full Backup & Restore")
         insert_body(
-            "• Backup All: creates a ZIP with config, connections, snippets, credentials"
+            "• Backup All: creates a .zip containing config, connections, snippets, and encrypted credentials"
         )
-        insert_body("• Restore All: restores everything from a backup ZIP")
+        insert_body(
+            "• Restore All: restores everything from a backup .zip (replaces current data)"
+        )
         insert_body("• Access via Menu → Backup All / Restore All")
         insert_body("")
 
         insert_h2("Appearance")
         insert_body(
-            "• Global settings in Preferences: font, colors, cursor shape, scrollback"
+            "• Global settings in Preferences: font family & size, foreground/background color, cursor shape, scrollback lines"
         )
         insert_body(
-            "• Per-connection overrides: font, background/foreground color in connection properties"
+            "• Per-connection overrides: font and colors in connection properties → Appearance tab — these override the global defaults for that connection only"
         )
+        insert_body(
+            "• Scroll-wheel protection — numeric spinners and dropdown selectors throughout the app ignore mouse scroll events to prevent accidental value changes"
+        )
+        insert_body("")
+
+        insert_h2("Configuration Files")
+        insert_body("All configuration is stored in ~/.config/ssh-client-manager/:")
+        insert_body("")
+        insert_mono("  config.json        App preferences and settings")
+        insert_mono("  connections.json   Connection definitions")
+        insert_mono("  snippets.json      Command snippets")
+        insert_mono("  .store.key         Encryption key for the credential store")
+        insert_mono("  .credentials.enc   Encrypted passwords and passphrases")
         insert_body("")
 
         scrolled.set_child(text_view)

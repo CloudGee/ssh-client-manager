@@ -1010,17 +1010,40 @@ class TerminalWidget(Gtk.Box):
     def _setup_context_menu(self):
         """Set up right-click context menu."""
         click = Gtk.GestureClick(button=3)  # Right click
+        click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         click.connect("pressed", self._show_context_menu)
         self.vte.add_controller(click)
+        self._context_popover = None
 
     def _show_context_menu(self, gesture, n_press, x, y):
-        """Show the terminal context menu."""
+        """Show the terminal context menu at the click position."""
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+
+        # Clean up any previous popover
+        if self._context_popover is not None:
+            self._context_popover.unparent()
+            self._context_popover = None
+
         menu_model = self._build_context_menu()
         popover = Gtk.PopoverMenu(menu_model=menu_model)
         popover.set_parent(self.vte)
-        popover.set_pointing_to(Gdk.Rectangle(int(x), int(y), 1, 1))
+        popover.set_has_arrow(False)
 
-        # We need to connect action handlers on the widget
+        # Gdk.Rectangle() ignores positional args — must set properties
+        rect = Gdk.Rectangle()
+        rect.x = int(x)
+        rect.y = int(y)
+        rect.width = 1
+        rect.height = 1
+        popover.set_pointing_to(rect)
+
+        def _on_closed(_p):
+            _p.unparent()
+            if self._context_popover is _p:
+                self._context_popover = None
+
+        popover.connect("closed", _on_closed)
+        self._context_popover = popover
         popover.popup()
 
     def _build_context_menu(self):
