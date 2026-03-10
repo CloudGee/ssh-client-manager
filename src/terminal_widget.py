@@ -43,6 +43,9 @@ class TerminalWidget(Gtk.Box):
         self._font_scale = 1.0
         self._session_recorder = None
         self._recording_handler_id = None
+        # Set when SSH -f flag is used (backgrounds itself); prevents false
+        # disconnect detection when the parent SSH process exits immediately.
+        self._background_mode = False
 
         # Create VTE terminal
         self.vte = Vte.Terminal()
@@ -186,6 +189,13 @@ class TerminalWidget(Gtk.Box):
             else:
                 print(f"Warning: command not found in PATH: {argv[0]}")
                 return
+
+        # Detect SSH -f flag (background mode): SSH will fork to background
+        # and the terminal child process exits immediately with code 0.
+        # We mark the terminal so child-exited doesn't trigger reconnect logic.
+        self._background_mode = bool(
+            argv and os.path.basename(argv[0]) in ("ssh", "ssh.real") and "-f" in argv
+        )
 
         try:
             self.vte.spawn_async(

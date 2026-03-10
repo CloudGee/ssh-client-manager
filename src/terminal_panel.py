@@ -880,7 +880,10 @@ class TerminalPanel(Gtk.Box):
         """Handle terminal child process exiting."""
         if terminal in self._terminals:
             conn, tab_label, nb = self._terminals[terminal]
-            tab_label.mark_disconnected()
+            # Skip visual disconnect for SSH -f (background mode): the
+            # SSH parent exits immediately but the tunnel/command is alive.
+            if not getattr(terminal, "_background_mode", False):
+                tab_label.mark_disconnected()
             self.emit("child-exited", terminal, conn)
 
     def mark_tab_active(self, terminal):

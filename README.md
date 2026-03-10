@@ -8,7 +8,7 @@ A modern, user-friendly SSH connection manager built with **Python 3**, **GTK4**
 - **Tabbed Interface**: Multiple tabs per split pane, with drag-and-drop between panes
 - **Encrypted Credential Storage**: AES-encrypted password and passphrase storage (no plaintext, no expect)
 - **SSH_ASKPASS Authentication**: Secure password injection via SSH_ASKPASS mechanism (no expect scripts)
-- **Hierarchical Groups**: Organize servers in nested groups (e.g., Production/WebServers)
+- **Hierarchical Groups**: Organize servers in nested groups (e.g., Production/WebServers) with drag-and-drop reordering of both connections and groups
 - **Cluster Mode**: Send commands to all open terminals simultaneously
 - **Modern UI**: GTK4 + libadwaita with dark/light theme support
 - **Connection Management**: Full CRUD for connections with import/export

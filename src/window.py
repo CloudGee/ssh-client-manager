@@ -140,8 +140,12 @@ class MainWindow(Adw.ApplicationWindow):
             "delete": self._on_sidebar_delete,
             "duplicate": self._on_sidebar_duplicate,
             "add-connection": lambda *_: self._on_new_connection(None, None),
-            "add-group": lambda *_: self._on_add_group(),
-            "add-subgroup": lambda *_: self._on_add_group(),
+            "add-group": lambda *_: self._on_add_group(
+                self.sidebar.get_selected_group_path() or ""
+            ),
+            "add-subgroup": lambda *_: self._on_add_group(
+                self.sidebar.get_selected_group_path() or ""
+            ),
             "delete-group": self._on_delete_group,
         }
         for name, callback in sidebar_actions.items():
@@ -326,7 +330,9 @@ class MainWindow(Adw.ApplicationWindow):
         self.sidebar.connect(
             "add-requested", lambda _: self._on_new_connection(None, None)
         )
-        self.sidebar.connect("add-group-requested", lambda _: self._on_add_group())
+        self.sidebar.connect(
+            "add-group-requested", lambda _, prefix: self._on_add_group(prefix)
+        )
 
         # Terminal panel signals
         self.terminal_panel.connect("tab-added", self._on_tab_added)
@@ -1164,7 +1170,7 @@ class MainWindow(Adw.ApplicationWindow):
                 self.sidebar.refresh()
                 self._set_status(f"Connection duplicated: {new_conn.name}")
 
-    def _on_add_group(self):
+    def _on_add_group(self, prefix: str = ""):
         """Show a simple dialog to add a new group."""
         try:
             dialog = Adw.MessageDialog(
@@ -1176,11 +1182,14 @@ class MainWindow(Adw.ApplicationWindow):
             dialog.add_response("add", "Add")
             dialog.set_response_appearance("add", Adw.ResponseAppearance.SUGGESTED)
 
-            # Add entry
+            # Add entry — pre-fill with parent group prefix if available
             entry = Gtk.Entry()
             entry.set_placeholder_text("Group Name")
             entry.set_margin_start(12)
             entry.set_margin_end(12)
+            if prefix:
+                entry.set_text(prefix + "/")
+                entry.set_position(-1)  # cursor at end
             dialog.set_extra_child(entry)
 
             dialog.connect(
@@ -1284,6 +1293,12 @@ class MainWindow(Adw.ApplicationWindow):
             session_id = getattr(terminal, "_askpass_session_id", None)
             if session_id:
                 self.ssh_handler.cleanup_askpass(session_id)
+
+            # SSH -f: process daemonized itself intentionally — not a real
+            # disconnect.  Skip sidebar update and auto-reconnect entirely.
+            if getattr(terminal, "_background_mode", False):
+                self._set_status(f"{conn.name}: running in background (SSH -f)")
+                return
 
             # Only mark disconnected if no OTHER terminal uses this connection
             other_alive = any(

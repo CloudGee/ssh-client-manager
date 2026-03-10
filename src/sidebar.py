@@ -44,7 +44,7 @@ class Sidebar(Gtk.Box):
         "edit-requested": (GObject.SignalFlags.RUN_LAST, None, (str,)),
         "add-requested": (GObject.SignalFlags.RUN_LAST, None, ()),
         "delete-requested": (GObject.SignalFlags.RUN_LAST, None, (str,)),
-        "add-group-requested": (GObject.SignalFlags.RUN_LAST, None, ()),
+        "add-group-requested": (GObject.SignalFlags.RUN_LAST, None, (str,)),
         "open-sftp-requested": (GObject.SignalFlags.RUN_LAST, None, (str,)),
     }
 
@@ -88,7 +88,12 @@ class Sidebar(Gtk.Box):
 
         btn_add_group = Gtk.Button(icon_name="folder-new-symbolic")
         btn_add_group.set_tooltip_text("Add Group")
-        btn_add_group.connect("clicked", lambda _: self.emit("add-group-requested"))
+        btn_add_group.connect(
+            "clicked",
+            lambda _: self.emit(
+                "add-group-requested", self.get_selected_group_path() or ""
+            ),
+        )
         btn_add_group.add_css_class("flat")
         toolbar.append(btn_add_group)
 
@@ -309,22 +314,32 @@ class Sidebar(Gtk.Box):
     # --- Signal handlers ---
 
     def _setup_dnd(self):
-        """Set up drag-and-drop for moving connections between groups."""
-        # Drag source: connection rows can be dragged
+        """Set up drag-and-drop for moving connections and groups."""
+        # Drag source: connection and group rows can be dragged
         drag_source = Gtk.DragSource()
         drag_source.set_actions(Gdk.DragAction.MOVE)
         drag_source.connect("prepare", self._on_dnd_prepare)
         drag_source.connect("drag-begin", self._on_dnd_drag_begin)
         self.tree_view.add_controller(drag_source)
 
-        # Drop target: groups and empty space can receive connections
+        # Drop target: groups and empty space can receive connections or groups
         drop_target = Gtk.DropTarget.new(GObject.TYPE_STRING, Gdk.DragAction.MOVE)
         drop_target.connect("drop", self._on_dnd_drop)
         drop_target.connect("motion", self._on_dnd_motion)
         self.tree_view.add_controller(drop_target)
 
+    @staticmethod
+    def _group_is_ancestor(ancestor_path: str, child_path: str) -> bool:
+        """Return True if ancestor_path is equal to or an ancestor of child_path."""
+        return child_path == ancestor_path or child_path.startswith(ancestor_path + "/")
+
     def _on_dnd_prepare(self, source, x, y):
-        """Prepare drag data — only allow dragging connection rows."""
+        """Prepare drag data — allow dragging both connection and group rows.
+
+        Drag data format:
+          - Connection: "conn:<connection_id>"
+          - Group:      "group:<group_path>"
+        """
         path_info = self.tree_view.get_path_at_pos(int(x), int(y))
         if not path_info:
             return None
@@ -332,18 +347,33 @@ class Sidebar(Gtk.Box):
         path = path_info[0]
         iter_ = self.filter_model.get_iter(path)
         is_group = self.filter_model.get_value(iter_, COL_IS_GROUP)
+
         if is_group:
-            return None  # Don't allow dragging groups
-
-        conn_id = self.filter_model.get_value(iter_, COL_CONNECTION_ID)
-        if not conn_id:
-            return None
-
-        self._drag_conn_id = conn_id
-        return Gdk.ContentProvider.new_for_value(conn_id)
+            group_path = self.filter_model.get_value(iter_, COL_GROUP_PATH)
+            if not group_path:
+                return None
+            self._drag_conn_id = None
+            self._drag_group_path = group_path
+            return Gdk.ContentProvider.new_for_value(f"group:{group_path}")
+        else:
+            conn_id = self.filter_model.get_value(iter_, COL_CONNECTION_ID)
+            if not conn_id:
+                return None
+            self._drag_conn_id = conn_id
+            self._drag_group_path = None
+            return Gdk.ContentProvider.new_for_value(f"conn:{conn_id}")
 
     def _on_dnd_drag_begin(self, source, drag):
-        """Set drag icon — show only the dragged row, not the whole tree."""
+        """Set drag icon — show only the dragged item label."""
+        drag_group = getattr(self, "_drag_group_path", None)
+        if drag_group:
+            leaf = drag_group.split("/")[-1]
+            label = Gtk.Label(label=f"  {leaf}  ")
+            label.add_css_class("heading")
+            icon = Gtk.DragIcon.get_for_drag(drag)
+            icon.set_child(label)
+            return
+
         conn_id = getattr(self, "_drag_conn_id", None)
         if conn_id:
             conn = self.connection_manager.get_connection(conn_id)
@@ -358,27 +388,43 @@ class Sidebar(Gtk.Box):
 
     def _on_dnd_motion(self, target, x, y):
         """Highlight potential drop target during drag."""
+        drag_group = getattr(self, "_drag_group_path", None)
         path_info = self.tree_view.get_path_at_pos(int(x), int(y))
         if path_info:
             path = path_info[0]
             iter_ = self.filter_model.get_iter(path)
             is_group = self.filter_model.get_value(iter_, COL_IS_GROUP)
             if is_group:
+                if drag_group:
+                    # Refuse to drop a group onto itself or a descendant
+                    target_group_path = self.filter_model.get_value(
+                        iter_, COL_GROUP_PATH
+                    )
+                    if self._group_is_ancestor(drag_group, target_group_path):
+                        return None
                 self.tree_view.set_cursor(path, None, False)
                 return Gdk.DragAction.MOVE
         return Gdk.DragAction.MOVE  # Allow drop on empty space (root level)
 
     def _on_dnd_drop(self, target, value, x, y):
-        """Handle drop — move connection to the target group."""
-        conn_id = value
-        if not conn_id:
+        """Handle drop — move connection or group to the target group."""
+        if not value:
             return False
 
+        if value.startswith("group:"):
+            return self._handle_group_drop(value[6:], x, y)
+        elif value.startswith("conn:"):
+            return self._handle_conn_drop(value[5:], x, y)
+        else:
+            # Legacy plain conn_id format
+            return self._handle_conn_drop(value, x, y)
+
+    def _handle_conn_drop(self, conn_id: str, x: float, y: float) -> bool:
+        """Move a connection to the target group."""
         conn = self.connection_manager.get_connection(conn_id)
         if not conn:
             return False
 
-        # Determine target group
         target_group = ""
         path_info = self.tree_view.get_path_at_pos(int(x), int(y))
         if path_info:
@@ -391,12 +437,42 @@ class Sidebar(Gtk.Box):
                 # Dropped on a connection — use that connection's group
                 target_group = self.filter_model.get_value(iter_, COL_GROUP_PATH) or ""
 
-        # Only move if the group actually changed
         if conn.group != target_group:
             conn.group = target_group
             self.connection_manager.update_connection(conn)
             self.refresh()
 
+        return True
+
+    def _handle_group_drop(self, drag_group_path: str, x: float, y: float) -> bool:
+        """Move a group to be a child of the target group (or to root level)."""
+        group_leaf = drag_group_path.split("/")[-1]
+
+        # Determine the new parent path
+        target_parent = ""
+        path_info = self.tree_view.get_path_at_pos(int(x), int(y))
+        if path_info:
+            path = path_info[0]
+            iter_ = self.filter_model.get_iter(path)
+            is_group = self.filter_model.get_value(iter_, COL_IS_GROUP)
+            if is_group:
+                target_group_path = self.filter_model.get_value(iter_, COL_GROUP_PATH)
+                # Guard: cannot drop a group onto itself or a descendant
+                if self._group_is_ancestor(drag_group_path, target_group_path):
+                    return False
+                target_parent = target_group_path
+
+        # Compute new full group path
+        new_group_path = (
+            f"{target_parent}/{group_leaf}" if target_parent else group_leaf
+        )
+
+        # No-op if already at the same location
+        if new_group_path == drag_group_path:
+            return True
+
+        self.connection_manager.rename_group(drag_group_path, new_group_path)
+        self.refresh()
         return True
 
     def _on_row_activated(self, tree_view, path, column):
@@ -434,7 +510,10 @@ class Sidebar(Gtk.Box):
                 group_path = self.filter_model.get_value(iter_, COL_GROUP_PATH)
                 items = [
                     ("Add Connection Here", lambda _: self.emit("add-requested")),
-                    ("Add Subgroup", lambda _: self.emit("add-group-requested")),
+                    (
+                        "Add Subgroup",
+                        lambda _, gp=group_path: self.emit("add-group-requested", gp),
+                    ),
                     (None, None),
                     (
                         "Rename Group",
@@ -496,7 +575,7 @@ class Sidebar(Gtk.Box):
         else:
             items = [
                 ("Add Connection", lambda _: self.emit("add-requested")),
-                ("Add Group", lambda _: self.emit("add-group-requested")),
+                ("Add Group", lambda _: self.emit("add-group-requested", "")),
             ]
 
         # Build popover with buttons
