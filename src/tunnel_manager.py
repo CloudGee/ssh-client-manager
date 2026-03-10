@@ -16,6 +16,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
 from gi.repository import Gtk, Adw, GLib, GObject
+from .utils import block_scroll
 
 
 class TunnelEntry:
@@ -309,6 +310,7 @@ class TunnelManagerDialog(Adw.Window):
         combo_type.append("R", "Remote Forward (-R)")
         combo_type.append("D", "Dynamic SOCKS (-D)")
         combo_type.set_active_id(tunnel.tunnel_type)
+        block_scroll(combo_type)
         content.append(self._field_row("Type:", combo_type))
 
         # Local port
@@ -355,6 +357,7 @@ class TunnelManagerDialog(Adw.Window):
         spin_ssh_port.set_range(1, 65535)
         spin_ssh_port.set_value(tunnel.ssh_port)
         spin_ssh_port.set_increments(1, 10)
+        block_scroll(spin_ssh_port)
         content.append(self._field_row("SSH Port:", spin_ssh_port))
 
         box.append(content)

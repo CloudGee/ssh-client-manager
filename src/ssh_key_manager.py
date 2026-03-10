@@ -17,6 +17,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
 from gi.repository import Gtk, Adw, GLib, GObject
+from .utils import block_scroll
 
 
 class SSHKeyManagerDialog(Adw.Window):
@@ -248,6 +249,7 @@ class SSHKeyManagerDialog(Adw.Window):
         combo_type.append("rsa", "RSA (4096-bit)")
         combo_type.append("ecdsa", "ECDSA")
         combo_type.set_active_id("ed25519")
+        block_scroll(combo_type)
         content.append(self._field_row("Type:", combo_type))
 
         # Filename
@@ -375,6 +377,7 @@ class SSHKeyManagerDialog(Adw.Window):
         spin_port.set_range(1, 65535)
         spin_port.set_value(22)
         spin_port.set_increments(1, 10)
+        block_scroll(spin_port)
         content.append(self._field_row("Port:", spin_port))
 
         status_label = Gtk.Label()

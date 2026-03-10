@@ -18,6 +18,7 @@ from typing import Optional
 
 from .connection import Connection, ConnectionManager
 from .credential_store import CredentialStore
+from .utils import block_scroll
 
 
 class ConnectionDialog(Adw.Window):
@@ -119,6 +120,7 @@ class ConnectionDialog(Adw.Window):
             self.combo_protocol.append(proto, proto.upper())
         self.combo_protocol.set_active_id("ssh")
         self.combo_protocol.connect("changed", self._on_protocol_changed)
+        block_scroll(self.combo_protocol)
         box.append(self._labeled("Protocol:", self.combo_protocol))
 
         box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
@@ -130,6 +132,7 @@ class ConnectionDialog(Adw.Window):
             self.combo_group.append_text(group)
         self.combo_group.set_hexpand(True)
         self.combo_group.connect("changed", self._on_group_combo_changed)
+        block_scroll(self.combo_group)
         box.append(self._labeled("Group:", self.combo_group))
 
         # New group entry
@@ -156,6 +159,7 @@ class ConnectionDialog(Adw.Window):
                 label = f"[{conn.group}] {conn.name}" if conn.group else conn.name
                 self.combo_depends_on.append(conn.id, label)
         self.combo_depends_on.set_active_id("")
+        block_scroll(self.combo_depends_on)
         box.append(self._labeled("Open After:", self.combo_depends_on))
 
         # Jump host (ProxyJump) or ProxyCommand
@@ -191,6 +195,7 @@ class ConnectionDialog(Adw.Window):
         self.spin_reconnect_delay.set_range(1, 300)
         self.spin_reconnect_delay.set_value(5)
         self.spin_reconnect_delay.set_increments(1, 5)
+        block_scroll(self.spin_reconnect_delay)
         box.append(self._labeled("Delay (seconds):", self.spin_reconnect_delay))
 
         self.spin_reconnect_max = Gtk.SpinButton()
@@ -198,6 +203,7 @@ class ConnectionDialog(Adw.Window):
         self.spin_reconnect_max.set_value(3)
         self.spin_reconnect_max.set_increments(1, 5)
         self.spin_reconnect_max.set_tooltip_text("0 = unlimited attempts")
+        block_scroll(self.spin_reconnect_max)
         box.append(self._labeled("Max Attempts:", self.spin_reconnect_max))
 
         box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
@@ -241,6 +247,7 @@ class ConnectionDialog(Adw.Window):
         self.spin_port.set_range(0, 65535)
         self.spin_port.set_value(0)
         self.spin_port.set_increments(1, 100)
+        block_scroll(self.spin_port)
         port_row = self._labeled("Port:", self.spin_port)
         self._port_hint = Gtk.Label(label="(0 = protocol default)")
         self._port_hint.add_css_class("dim-label")
@@ -280,6 +287,7 @@ class ConnectionDialog(Adw.Window):
         self.combo_vnc_quality.append("medium", "Medium")
         self.combo_vnc_quality.append("low", "Low")
         self.combo_vnc_quality.set_active_id("high")
+        block_scroll(self.combo_vnc_quality)
         self._vnc_section.append(self._labeled("Quality:", self.combo_vnc_quality))
 
         self._struct_section.append(self._vnc_section)
@@ -521,6 +529,7 @@ class ConnectionDialog(Adw.Window):
         combo_type.append("D", "Dynamic (-D)")
         combo_type.set_active_id(pf_type)
         combo_type.set_size_request(120, -1)
+        block_scroll(combo_type)
         row.append(combo_type)
 
         entry_local = Gtk.Entry()

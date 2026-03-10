@@ -308,6 +308,10 @@ class TerminalPanel(Gtk.Box):
         focus_ctrl.connect("enter", lambda _, t=terminal: self._on_terminal_focused(t))
         terminal.vte.add_controller(focus_ctrl)
 
+        # Ensure clicking the tab header always focuses the terminal
+        # (switch-page only fires on page *change*, not re-click of same tab)
+        self._attach_tab_click_focus(tab_label, terminal)
+
         # Add to notebook
         page_num = nb.append_page(terminal, tab_label)
         nb.set_tab_reorderable(terminal, True)
@@ -318,6 +322,25 @@ class TerminalPanel(Gtk.Box):
 
         self.emit("tab-added", terminal)
         return nb
+
+    def _attach_tab_click_focus(self, tab_label: "TabLabel", terminal: TerminalWidget):
+        """Attach a GestureClick to *tab_label* so clicking it always focuses *terminal*.
+
+        Also updates focused_terminal / focused_notebook so that the
+        correct pane is tracked even in split layouts.
+        """
+
+        def _on_tab_clicked(gest, n, x, y, t=terminal):
+            info = self._terminals.get(t)
+            if info:
+                self.focused_terminal = t
+                self.focused_notebook = info[2]
+                self.emit("active-terminal-changed", t)
+            GLib.idle_add(t.grab_focus)
+
+        tab_click = Gtk.GestureClick()
+        tab_click.connect("released", _on_tab_clicked)
+        tab_label.add_controller(tab_click)
 
     @staticmethod
     def _clear_root_focus(widget: Gtk.Widget):
@@ -563,6 +586,7 @@ class TerminalPanel(Gtk.Box):
                     "close-clicked",
                     lambda _, t=child_to_move: self._close_tab_by_lookup(t),
                 )
+                self._attach_tab_click_focus(restore_lbl, child_to_move)
                 self._terminals[child_to_move] = (conn, restore_lbl, nb)
                 nb.append_page(child_to_move, restore_lbl)
                 nb.set_tab_reorderable(child_to_move, True)
@@ -583,6 +607,7 @@ class TerminalPanel(Gtk.Box):
             new_tab_label.connect(
                 "close-clicked", lambda _, t=child_to_move: self._close_tab_by_lookup(t)
             )
+            self._attach_tab_click_focus(new_tab_label, child_to_move)
             self._terminals[child_to_move] = (conn, new_tab_label, new_nb)
             new_nb.append_page(child_to_move, new_tab_label)
             child_to_move.set_visible(True)
@@ -666,6 +691,7 @@ class TerminalPanel(Gtk.Box):
                     "close-clicked",
                     lambda _, t=child_widget: self._close_tab_by_lookup(t),
                 )
+                self._attach_tab_click_focus(new_label, child_widget)
                 self._terminals[child_widget] = (
                     tab_info[0] if tab_info else None,
                     new_label,
@@ -850,6 +876,7 @@ class TerminalPanel(Gtk.Box):
             self.focused_terminal = child
             self.focused_notebook = notebook
             self.emit("active-terminal-changed", child)
+            GLib.idle_add(child.grab_focus)
 
     def _on_terminal_focused(self, terminal: TerminalWidget):
         """Track which terminal/notebook has focus (looks up notebook dynamically)."""

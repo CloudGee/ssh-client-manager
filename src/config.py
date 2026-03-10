@@ -75,12 +75,22 @@ DEFAULTS = {
     "notify_on_completion": True,
     # Cluster mode
     "cluster_mode_enabled": False,
+    # AI Assistant
+    "ai_provider": "openai",  # "openai" or "claude"
+    "ai_api_key": "",
+    "ai_base_url": "https://api.openai.com/v1",
+    "ai_model": "gpt-4o-mini",
+    "ai_system_prompt": "",  # Custom system prompt (empty = use built-in default)
+    # Screenshot
+    "screenshot_watermark": "",  # Watermark text (empty = disabled)
     # RDP defaults
     "rdp_default_port": 3389,
     "rdp_default_resolution": "1920x1080",
     # VNC defaults
     "vnc_default_port": 5900,
     "vnc_default_quality": "high",
+    # Group display order (flat list of group paths in preferred order)
+    "group_order": [],
 }
 
 

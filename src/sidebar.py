@@ -17,6 +17,7 @@ from gi.repository import Gtk, Adw, GLib, Gdk, GObject, Pango, Gio
 from typing import Optional
 
 from .connection import Connection, ConnectionManager
+from .config import Config
 from .sftp_browser import SftpBrowser
 
 
@@ -48,10 +49,16 @@ class Sidebar(Gtk.Box):
         "open-sftp-requested": (GObject.SignalFlags.RUN_LAST, None, (str,)),
     }
 
-    def __init__(self, connection_manager: ConnectionManager, credential_store=None):
+    def __init__(
+        self,
+        connection_manager: ConnectionManager,
+        credential_store=None,
+        config: Config = None,
+    ):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.connection_manager = connection_manager
         self.credential_store = credential_store
+        self.config = config
 
         # Track which connections are currently open
         self._connected_ids: set[str] = set()
@@ -96,6 +103,12 @@ class Sidebar(Gtk.Box):
         )
         btn_add_group.add_css_class("flat")
         toolbar.append(btn_add_group)
+
+        btn_sort_groups = Gtk.Button(icon_name="view-sort-ascending-symbolic")
+        btn_sort_groups.set_tooltip_text("Sort Groups")
+        btn_sort_groups.connect("clicked", lambda _: self._open_group_order_dialog())
+        btn_sort_groups.add_css_class("flat")
+        toolbar.append(btn_sort_groups)
 
         self.append(toolbar)
 
@@ -210,11 +223,15 @@ class Sidebar(Gtk.Box):
         groups = self.connection_manager.get_groups()
         connections = self.connection_manager.get_connections()
 
+        # Sort groups using custom order from config, falling back to alphabetical
+        group_order = self.config.get("group_order", []) if self.config else []
+        sorted_groups = self._sort_groups(groups, group_order)
+
         # Track created group rows by path
         group_iters = {}
 
         # Create group rows
-        for group_path in sorted(groups):
+        for group_path in sorted_groups:
             parts = group_path.split("/")
             for i, part in enumerate(parts):
                 current_path = "/".join(parts[: i + 1])
@@ -289,6 +306,79 @@ class Sidebar(Gtk.Box):
         # Expand all by default
         self.tree_view.expand_all()
         self.filter_model.refilter()
+
+    @staticmethod
+    def _sort_groups(groups: list[str], group_order: list[str]) -> list[str]:
+        """Sort group paths respecting custom order within each level.
+
+        For each parent level, children listed in *group_order* appear first
+        (in that order), followed by any remaining children alphabetically.
+        """
+        if not group_order:
+            return sorted(groups)
+
+        # Build an order index for fast lookup
+        order_idx = {path: i for i, path in enumerate(group_order)}
+
+        # Gather all unique group paths including intermediate parents
+        all_paths: set[str] = set()
+        for gp in groups:
+            parts = gp.split("/")
+            for i in range(len(parts)):
+                all_paths.add("/".join(parts[: i + 1]))
+
+        # Build tree: parent_path -> list of child names
+        children_of: dict[str, set[str]] = {}
+        for p in all_paths:
+            if "/" in p:
+                parent = p.rsplit("/", 1)[0]
+            else:
+                parent = ""
+            children_of.setdefault(parent, set()).add(p)
+
+        def _sort_key(path: str):
+            if path in order_idx:
+                return (0, order_idx[path], "")
+            return (1, 0, path.rsplit("/", 1)[-1].lower())
+
+        # BFS to produce ordered list
+        result: list[str] = []
+        queue = sorted(children_of.get("", []), key=_sort_key)
+        while queue:
+            current = queue.pop(0)
+            result.append(current)
+            children = children_of.get(current, [])
+            if children:
+                sorted_children = sorted(children, key=_sort_key)
+                # Insert children right after current (depth-first)
+                queue = sorted_children + queue
+
+        # Only return paths that are in the original groups list
+        groups_set = set(groups)
+        return [p for p in result if p in groups_set]
+
+    def _open_group_order_dialog(self):
+        """Open the group ordering dialog."""
+        groups = self.connection_manager.get_groups()
+        if not groups:
+            return
+
+        dialog = GroupOrderDialog(
+            groups,
+            self.config.get("group_order", []) if self.config else [],
+            transient_for=self.get_root(),
+        )
+        dialog.connect("response", self._on_group_order_response)
+        dialog.present()
+
+    def _on_group_order_response(self, dialog, response):
+        """Handle group order dialog response."""
+        if response == "apply":
+            order = dialog.get_order()
+            if self.config:
+                self.config.set("group_order", order)
+            self.refresh()
+        dialog.close()
 
     def get_selected_connection_id(self) -> Optional[str]:
         """Get the connection ID of the selected row, or None."""
@@ -908,3 +998,254 @@ class Sidebar(Gtk.Box):
     def is_sftp_mode(self) -> bool:
         """Whether the sidebar is showing the SFTP browser."""
         return self._stack.get_visible_child_name() == "sftp"
+
+
+# =====================================================================
+# Group Order Dialog
+# =====================================================================
+
+
+class GroupOrderDialog(Adw.Window):
+    """Dialog for reordering sidebar groups.
+
+    Shows groups in a hierarchical list with Move Up / Move Down buttons
+    to reorder sibling groups within each level.
+    """
+
+    __gsignals__ = {
+        "response": (GObject.SignalFlags.RUN_LAST, None, (str,)),
+    }
+
+    def __init__(self, groups: list[str], current_order: list[str], transient_for=None):
+        super().__init__(
+            title="Sort Groups",
+            default_width=400,
+            default_height=500,
+            modal=True,
+        )
+        if transient_for:
+            self.set_transient_for(transient_for)
+
+        self._groups = sorted(set(groups))
+        self._current_order = list(current_order) if current_order else []
+
+        # Build the full hierarchy of group names at each level
+        self._build_hierarchy()
+
+        # ── Header bar ──
+        header = Adw.HeaderBar()
+        header.set_show_end_title_buttons(False)
+        header.set_show_start_title_buttons(False)
+
+        btn_cancel = Gtk.Button(label="Cancel")
+        btn_cancel.connect("clicked", lambda _: self.emit("response", "cancel"))
+        header.pack_start(btn_cancel)
+
+        btn_apply = Gtk.Button(label="Apply")
+        btn_apply.add_css_class("suggested-action")
+        btn_apply.connect("clicked", lambda _: self.emit("response", "apply"))
+        header.pack_end(btn_apply)
+
+        # ── Main layout ──
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        main_box.append(header)
+
+        # ── Toolbar with Move buttons ──
+        toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        toolbar.set_margin_start(8)
+        toolbar.set_margin_end(8)
+        toolbar.set_margin_top(8)
+        toolbar.set_margin_bottom(4)
+
+        self._btn_up = Gtk.Button(icon_name="go-up-symbolic")
+        self._btn_up.set_tooltip_text("Move Up")
+        self._btn_up.add_css_class("flat")
+        self._btn_up.set_sensitive(False)
+        self._btn_up.connect("clicked", lambda _: self._move_selected(-1))
+        toolbar.append(self._btn_up)
+
+        self._btn_down = Gtk.Button(icon_name="go-down-symbolic")
+        self._btn_down.set_tooltip_text("Move Down")
+        self._btn_down.add_css_class("flat")
+        self._btn_down.set_sensitive(False)
+        self._btn_down.connect("clicked", lambda _: self._move_selected(1))
+        toolbar.append(self._btn_down)
+
+        reset_btn = Gtk.Button(label="Reset to A-Z")
+        reset_btn.add_css_class("flat")
+        reset_btn.set_hexpand(True)
+        reset_btn.set_halign(Gtk.Align.END)
+        reset_btn.connect("clicked", lambda _: self._reset_order())
+        toolbar.append(reset_btn)
+
+        main_box.append(toolbar)
+        main_box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        # ── Tree view ──
+        # Columns: display_text, group_path, indent_level
+        self._store = Gtk.ListStore(str, str, int)
+        self._tree = Gtk.TreeView(model=self._store)
+        self._tree.set_headers_visible(False)
+        self._tree.set_enable_search(False)
+
+        col = Gtk.TreeViewColumn()
+        col.set_expand(True)
+
+        text_renderer = Gtk.CellRendererText()
+        text_renderer.set_padding(4, 6)
+        col.pack_start(text_renderer, True)
+        col.set_cell_data_func(text_renderer, self._render_cell)
+
+        self._tree.append_column(col)
+        self._tree.get_selection().connect("changed", self._on_selection_changed)
+
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_vexpand(True)
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_child(self._tree)
+
+        main_box.append(scrolled)
+
+        # ── Info label ──
+        info = Gtk.Label(label="Select a group and use ↑ ↓ to reorder within its level")
+        info.add_css_class("dim-label")
+        info.set_margin_top(6)
+        info.set_margin_bottom(8)
+        info.set_margin_start(8)
+        info.set_margin_end(8)
+        info.set_wrap(True)
+        main_box.append(info)
+
+        self.set_content(main_box)
+
+        # Populate
+        self._populate()
+
+    def _build_hierarchy(self):
+        """Build a mapping of parent_path -> [child_names] in order."""
+        self._children_of: dict[str, list[str]] = {}  # parent -> [child full paths]
+        all_paths: set[str] = set()
+        for gp in self._groups:
+            parts = gp.split("/")
+            for i in range(len(parts)):
+                all_paths.add("/".join(parts[: i + 1]))
+
+        for p in all_paths:
+            if "/" in p:
+                parent = p.rsplit("/", 1)[0]
+            else:
+                parent = ""
+            self._children_of.setdefault(parent, [])
+            if p not in self._children_of[parent]:
+                self._children_of[parent].append(p)
+
+        # Sort each level using current_order, then alphabetically
+        order_idx = {path: i for i, path in enumerate(self._current_order)}
+        for parent in self._children_of:
+            self._children_of[parent].sort(
+                key=lambda p: (
+                    (0, order_idx[p])
+                    if p in order_idx
+                    else (1, p.rsplit("/", 1)[-1].lower())
+                )
+            )
+
+    def _populate(self):
+        """Fill the list store from the hierarchy."""
+        self._store.clear()
+
+        def _add_level(parent_path: str, depth: int):
+            children = self._children_of.get(parent_path, [])
+            for child_path in children:
+                name = (
+                    child_path.rsplit("/", 1)[-1] if "/" in child_path else child_path
+                )
+                indent = "    " * depth + ("📂 " if depth == 0 else "📁 ")
+                self._store.append([indent + name, child_path, depth])
+                _add_level(child_path, depth + 1)
+
+        _add_level("", 0)
+
+    def _render_cell(self, column, cell, model, iter_, data=None):
+        """Render cell with indentation."""
+        text = model.get_value(iter_, 0)
+        cell.set_property("text", text)
+
+    def _on_selection_changed(self, selection):
+        """Update button sensitivity based on selection."""
+        model, iter_ = selection.get_selected()
+        if iter_ is None:
+            self._btn_up.set_sensitive(False)
+            self._btn_down.set_sensitive(False)
+            return
+
+        path = model.get_value(iter_, 1)
+        siblings = self._get_siblings(path)
+        idx = siblings.index(path) if path in siblings else -1
+
+        self._btn_up.set_sensitive(idx > 0)
+        self._btn_down.set_sensitive(0 <= idx < len(siblings) - 1)
+
+    def _get_siblings(self, path: str) -> list[str]:
+        """Get the sibling group paths for the given path."""
+        if "/" in path:
+            parent = path.rsplit("/", 1)[0]
+        else:
+            parent = ""
+        return self._children_of.get(parent, [])
+
+    def _move_selected(self, direction: int):
+        """Move the selected group up (-1) or down (+1) among siblings."""
+        selection = self._tree.get_selection()
+        model, iter_ = selection.get_selected()
+        if iter_ is None:
+            return
+
+        path = model.get_value(iter_, 1)
+        parent = path.rsplit("/", 1)[0] if "/" in path else ""
+        siblings = self._children_of.get(parent, [])
+        idx = siblings.index(path)
+        new_idx = idx + direction
+
+        if new_idx < 0 or new_idx >= len(siblings):
+            return
+
+        # Swap in the children_of list
+        siblings[idx], siblings[new_idx] = siblings[new_idx], siblings[idx]
+
+        # Rebuild display
+        self._populate()
+
+        # Re-select the moved item
+        for i, row in enumerate(self._store):
+            if row[1] == path:
+                self._tree.get_selection().select_iter(
+                    self._store.get_iter_from_string(str(i))
+                )
+                self._tree.scroll_to_cell(
+                    Gtk.TreePath.new_from_string(str(i)), None, False, 0, 0
+                )
+                break
+
+    def _reset_order(self):
+        """Reset to alphabetical order."""
+        for parent in self._children_of:
+            self._children_of[parent].sort(key=lambda p: p.rsplit("/", 1)[-1].lower())
+        self._populate()
+        # Clear selection -> update buttons
+        self._tree.get_selection().unselect_all()
+
+    def get_order(self) -> list[str]:
+        """Return the flat ordered list of group paths for config storage.
+
+        Traverses the hierarchy depth-first to produce the ordered list.
+        """
+        result: list[str] = []
+
+        def _traverse(parent: str):
+            for child in self._children_of.get(parent, []):
+                result.append(child)
+                _traverse(child)
+
+        _traverse("")
+        return result

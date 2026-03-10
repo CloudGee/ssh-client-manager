@@ -604,6 +604,409 @@ class TerminalWidget(Gtk.Box):
 
         return False
 
+    def get_selected_text_async(self, callback):
+        """
+        Asynchronously retrieve selected terminal text.
+
+        Copies the current VTE selection to the system clipboard, then reads
+        it back via an async clipboard call.  ``callback(text: str)`` is called
+        on the GTK main thread; ``text`` may be empty if nothing is selected.
+        """
+        if not self.vte.get_has_selection():
+            callback("")
+            return
+        # Copy selection to clipboard so we can read the string
+        self.vte.copy_clipboard_format(Vte.Format.TEXT)
+
+        def _read_done(clip, result):
+            try:
+                text = clip.read_text_finish(result) or ""
+            except Exception:
+                text = ""
+            callback(text)
+
+        # Give VTE a tick to flush the clipboard before reading
+        def _schedule_read():
+            self.get_clipboard().read_text_async(None, _read_done)
+            return False
+
+        GLib.timeout_add(80, _schedule_read)
+
+    # ── Screenshot ──────────────────────────────────────────────────────────
+
+    def screenshot_selection_to_clipboard(self):
+        """
+        Render the terminal as a PNG screenshot preserving ANSI colours.
+
+        Uses VTE's HTML export to extract per-character colour information,
+        then renders with Cairo/PangoCairo.  Falls back to WidgetPaintable
+        or plain-text rendering when needed.
+        """
+        self._render_vte_screenshot()
+
+    def _render_vte_screenshot(self):
+        """Render the VTE as a coloured PNG screenshot."""
+        # Method 1: VTE HTML export (reliable colour capture)
+        if self._try_html_screenshot():
+            return
+
+        # Method 2: WidgetPaintable (captures GL-rendered widgets)
+        if self._try_paintable_screenshot():
+            return
+
+        # Method 3: Plain text fallback (no per-character colours)
+        self._render_text_screenshot_with_colors()
+
+    def _try_html_screenshot(self) -> bool:
+        """Render screenshot by parsing VTE's HTML export for colours."""
+        try:
+            import io
+            import cairo
+            import re
+            from html import unescape
+
+            gi.require_version("PangoCairo", "1.0")
+            from gi.repository import PangoCairo, Pango as _Pango
+        except Exception as exc:
+            print(f"[screenshot] Missing dependency for HTML method: {exc}")
+            return False
+
+        try:
+            html = self.vte.get_text_format(Vte.Format.HTML)
+            if isinstance(html, tuple):
+                html = html[0]
+            if not html or "<font" not in html and "<span" not in html:
+                return False
+        except Exception as exc:
+            print(f"[screenshot] VTE HTML export failed: {exc}")
+            return False
+
+        cfg = self.config
+        default_fg = cfg.get("terminal_fg_color", "#FFFFFF")
+        default_bg = cfg.get("terminal_bg_color", "#000000")
+        font_desc = _Pango.FontDescription.from_string(
+            cfg.get("terminal_font", "Monospace 12")
+        )
+
+        # ── Parse HTML into coloured segments per line ──
+        # VTE format: <font color="#RRGGBB">text</font>, <b>bold</b>
+        # Strip outer <pre>...</pre>
+        body = html
+        body = re.sub(r"</?pre>", "", body)
+
+        # Split into lines by actual newlines
+        raw_lines = body.split("\n")
+
+        # Parse each line into segments: (text, fg_colour)
+        font_pattern = re.compile(r'<font color="([^"]+)">(.*?)</font>', re.DOTALL)
+        tag_strip = re.compile(r"<[^>]+>")
+
+        parsed_lines: list[list[tuple[str, str]]] = []
+        for raw_line in raw_lines:
+            segments: list[tuple[str, str]] = []
+            pos = 0
+            for m in font_pattern.finditer(raw_line):
+                # Text before this match (no colour tag = default fg)
+                before = raw_line[pos : m.start()]
+                plain_before = tag_strip.sub("", before)
+                if plain_before:
+                    segments.append((unescape(plain_before), default_fg))
+                # Coloured segment
+                fg = m.group(1)
+                inner = m.group(2)
+                plain_inner = tag_strip.sub("", inner)
+                if plain_inner:
+                    segments.append((unescape(plain_inner), fg))
+                pos = m.end()
+            # Remainder after last match
+            remainder = raw_line[pos:]
+            plain_rem = tag_strip.sub("", remainder)
+            if plain_rem:
+                segments.append((unescape(plain_rem), default_fg))
+            parsed_lines.append(segments)
+
+        # Remove trailing empty lines
+        while parsed_lines and not parsed_lines[-1]:
+            parsed_lines.pop()
+        if not parsed_lines:
+            return False
+
+        # ── Measure character dimensions ──
+        PADDING = 12
+        LINE_SPACING = 1.2
+
+        probe = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+        pc = cairo.Context(probe)
+        layout = PangoCairo.create_layout(pc)
+        layout.set_font_description(font_desc)
+        layout.set_text("M", -1)
+        char_w, char_h = layout.get_pixel_size()
+        if char_h <= 0:
+            char_h = 14
+        if char_w <= 0:
+            char_w = 8
+        line_h = int(char_h * LINE_SPACING)
+
+        # Calculate image size
+        max_chars = max(
+            (sum(len(seg[0]) for seg in line) for line in parsed_lines),
+            default=80,
+        )
+        img_w = max(200, min(max_chars * char_w + PADDING * 2, 3000))
+        img_h = max(40, min(len(parsed_lines) * line_h + PADDING * 2, 3000))
+
+        # ── Render ──
+        bg_rgba = Gdk.RGBA()
+        bg_rgba.parse(default_bg)
+
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, img_w, img_h)
+        cr = cairo.Context(surface)
+
+        # Background
+        cr.set_source_rgba(bg_rgba.red, bg_rgba.green, bg_rgba.blue, 1.0)
+        cr.rectangle(0, 0, img_w, img_h)
+        cr.fill()
+
+        layout = PangoCairo.create_layout(cr)
+        layout.set_font_description(font_desc)
+
+        y = PADDING
+        for segments in parsed_lines:
+            x = PADDING
+            for text, fg_hex in segments:
+                fg = Gdk.RGBA()
+                if not fg.parse(fg_hex):
+                    fg.parse(default_fg)
+                cr.set_source_rgba(fg.red, fg.green, fg.blue, 1.0)
+                cr.move_to(x, y)
+                layout.set_text(text, -1)
+                PangoCairo.show_layout(cr, layout)
+                tw, _ = layout.get_pixel_size()
+                x += tw
+            y += line_h
+
+        # Watermark
+        watermark = cfg.get("screenshot_watermark", "").strip()
+        if watermark:
+            self._draw_watermark(cr, img_w, img_h, watermark, font_desc)
+
+        # PNG → clipboard
+        buf = io.BytesIO()
+        surface.write_to_png(buf)
+        png_bytes = buf.getvalue()
+        self._copy_png_to_clipboard(png_bytes, img_w, img_h)
+        print(f"[screenshot] HTML method: {img_w}×{img_h}, {len(parsed_lines)} lines")
+        return True
+
+    def _try_paintable_screenshot(self) -> bool:
+        """Try to capture VTE via WidgetPaintable (preserves GL rendering)."""
+        import tempfile
+        import os
+
+        alloc = self.vte.get_allocation()
+        w = alloc.width
+        h = alloc.height
+        if w <= 0 or h <= 0:
+            w, h = 800, 600
+
+        try:
+            paintable = Gtk.WidgetPaintable.new(self.vte)
+            snapshot = Gtk.Snapshot()
+            paintable.snapshot(snapshot, w, h)
+            node = snapshot.to_node()
+            if node is not None:
+                renderer = self.vte.get_native().get_renderer()
+                texture = renderer.render_texture(node, None)
+                tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                tmp.close()
+                texture.save_to_png(tmp.name)
+                with open(tmp.name, "rb") as f:
+                    png_bytes = f.read()
+                os.unlink(tmp.name)
+                png_bytes = self._maybe_add_watermark_to_png(png_bytes)
+                self._copy_png_to_clipboard(png_bytes, w, h)
+                print(f"[screenshot] WidgetPaintable: {w}×{h}")
+                return True
+        except Exception as exc:
+            print(f"[screenshot] WidgetPaintable failed: {exc}")
+        return False
+
+    def _maybe_add_watermark_to_png(self, png_bytes: bytes) -> bytes:
+        """Add watermark to existing PNG if configured."""
+        watermark = self.config.get("screenshot_watermark", "").strip()
+        if not watermark:
+            return png_bytes
+        try:
+            import io
+            import cairo
+
+            gi.require_version("PangoCairo", "1.0")
+            from gi.repository import PangoCairo, Pango as _Pango
+
+            # Load the PNG into a Cairo surface
+            surface = cairo.ImageSurface.create_from_png(io.BytesIO(png_bytes))
+            cr = cairo.Context(surface)
+            font_desc = _Pango.FontDescription.from_string(
+                self.config.get("terminal_font", "Monospace 12")
+            )
+            self._draw_watermark(
+                cr, surface.get_width(), surface.get_height(), watermark, font_desc
+            )
+            buf = io.BytesIO()
+            surface.write_to_png(buf)
+            return buf.getvalue()
+        except Exception:
+            return png_bytes
+
+    def _render_text_screenshot_with_colors(self):
+        """Fallback: render terminal text with the configured colour palette."""
+        text = self.get_text()
+        if not text or not text.strip():
+            return
+
+        try:
+            import io
+            import cairo
+
+            gi.require_version("PangoCairo", "1.0")
+            from gi.repository import PangoCairo, Pango as _Pango
+        except Exception as exc:
+            print(f"[screenshot] Missing dependency: {exc}")
+            return
+
+        cfg = self.config
+
+        # Terminal colours
+        bg_rgba = Gdk.RGBA()
+        bg_rgba.parse(cfg["terminal_bg_color"])
+        fg_rgba = Gdk.RGBA()
+        fg_rgba.parse(cfg["terminal_fg_color"])
+
+        font_desc = _Pango.FontDescription.from_string(cfg["terminal_font"])
+
+        lines = text.rstrip().splitlines()
+        if not lines:
+            return
+
+        PADDING = 16
+        LINE_SPACING_FACTOR = 1.25
+
+        # ── Measure one character to determine cell size ──
+        probe_surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+        probe_cr = cairo.Context(probe_surf)
+        probe_layout = PangoCairo.create_layout(probe_cr)
+        probe_layout.set_font_description(font_desc)
+        probe_layout.set_text("M", -1)
+        char_w, char_h = probe_layout.get_pixel_size()
+        if char_h <= 0:
+            char_h = 14
+        if char_w <= 0:
+            char_w = 8
+
+        line_h = int(char_h * LINE_SPACING_FACTOR)
+        max_chars = max((len(l) for l in lines), default=1)
+        img_w = max(200, min(max_chars * char_w + PADDING * 2, 2560))
+        img_h = max(40, min(len(lines) * line_h + PADDING * 2, 2048))
+
+        # ── Render ──
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, img_w, img_h)
+        cr = cairo.Context(surface)
+
+        # Background
+        cr.set_source_rgba(bg_rgba.red, bg_rgba.green, bg_rgba.blue, 1.0)
+        cr.rectangle(0, 0, img_w, img_h)
+        cr.fill()
+
+        # Text lines
+        cr.set_source_rgba(fg_rgba.red, fg_rgba.green, fg_rgba.blue, 1.0)
+        layout = PangoCairo.create_layout(cr)
+        layout.set_font_description(font_desc)
+
+        y = PADDING
+        for line in lines:
+            cr.move_to(PADDING, y)
+            layout.set_text(line or " ", -1)
+            PangoCairo.show_layout(cr, layout)
+            y += line_h
+
+        # ── Watermark ──
+        watermark = cfg.get("screenshot_watermark", "").strip()
+        if watermark:
+            self._draw_watermark(cr, img_w, img_h, watermark, font_desc)
+
+        # ── PNG → clipboard ──
+        buf = io.BytesIO()
+        surface.write_to_png(buf)
+        png_bytes = buf.getvalue()
+        self._copy_png_to_clipboard(png_bytes, img_w, img_h)
+
+    def _draw_watermark(self, cr, img_w, img_h, text, font_desc):
+        """Draw a semi-transparent watermark in the bottom-right corner."""
+        try:
+            from gi.repository import PangoCairo, Pango as _Pango
+        except Exception:
+            return
+
+        wm_font = font_desc.copy()
+        wm_font.set_size(int(font_desc.get_size() * 0.85))
+
+        layout = PangoCairo.create_layout(cr)
+        layout.set_font_description(wm_font)
+        layout.set_text(text, -1)
+        tw, th = layout.get_pixel_size()
+
+        x = img_w - tw - 12
+        y = img_h - th - 8
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.25)
+        cr.move_to(x, y)
+        PangoCairo.show_layout(cr, layout)
+
+    def _copy_png_to_clipboard(self, png_bytes, img_w, img_h):
+        """Copy PNG bytes to the system clipboard."""
+        import sys
+        import tempfile
+        import subprocess
+
+        if sys.platform == "darwin":
+            # macOS: GTK clipboard.set(texture) doesn't propagate to
+            # system pasteboard reliably.  Use osascript + temp file.
+            try:
+                tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                tmp.write(png_bytes)
+                tmp.flush()
+                tmp.close()
+                script = (
+                    "set the clipboard to "
+                    '(read (POSIX file "' + tmp.name + '") as «class PNGf»)'
+                )
+                subprocess.run(
+                    ["osascript", "-e", script],
+                    check=True,
+                    timeout=5,
+                )
+                print(
+                    f"[screenshot] PNG ({img_w}×{img_h}) "
+                    f"copied to clipboard via osascript."
+                )
+            except Exception as exc:
+                print(f"[screenshot] macOS clipboard error: {exc}")
+            finally:
+                try:
+                    import os as _os
+
+                    _os.unlink(tmp.name)
+                except Exception:
+                    pass
+        else:
+            # Linux / other: use GDK Texture → clipboard
+            try:
+                glib_bytes = GLib.Bytes.new(png_bytes)
+                texture = Gdk.Texture.new_from_bytes(glib_bytes)
+                self.get_clipboard().set(texture)
+                print(f"[screenshot] PNG ({img_w}×{img_h}) " f"copied to clipboard.")
+            except Exception as exc:
+                print(f"[screenshot] Could not set clipboard: {exc}")
+
     def _setup_context_menu(self):
         """Set up right-click context menu."""
         click = Gtk.GestureClick(button=3)  # Right click
@@ -646,5 +1049,9 @@ class TerminalWidget(Gtk.Box):
         section4.append("Command Snippets", "win.snippets")
         section4.append("Start / Stop Recording", "term.toggle-record")
         menu.append_section(None, section4)
+
+        section5 = Gio.Menu()
+        section5.append("Copy Screenshot of Selection", "term.screenshot")
+        menu.append_section(None, section5)
 
         return menu

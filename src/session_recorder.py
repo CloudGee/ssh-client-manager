@@ -16,6 +16,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
 from gi.repository import Gtk, Adw, GLib, GObject, Gio
+from .utils import block_scroll
 
 
 class SessionRecorder:
@@ -147,6 +148,7 @@ class SessionPlayerDialog(Adw.Window):
             speed_combo.append_text(s)
         speed_combo.set_active(1)
         speed_combo.connect("changed", self._on_speed_changed)
+        block_scroll(speed_combo)
         speed_box.append(speed_combo)
 
         header.pack_end(speed_box)

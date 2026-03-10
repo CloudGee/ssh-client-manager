@@ -20,6 +20,8 @@ A modern, user-friendly SSH connection manager built with **Python 3**, **GTK4**
 - **Auto-Reconnect**: Automatic reconnection prompt when SSH sessions disconnect unexpectedly
 - **SFTP File Browser**: Browse, upload, and download remote files with drag-and-drop support
 - **Command Snippets**: Save and reuse frequently used commands with variable substitution
+- **AI Assistant**: Ask an AI about selected terminal output, diagnose errors, and get command explanations — supports OpenAI and Anthropic Claude with provider selection, model list fetching, and Markdown-rendered responses with one-click paste of shell commands to the terminal
+- **Terminal Screenshot**: Copy a colour-preserving screenshot of the terminal as a PNG image to the clipboard, with configurable semi-transparent watermark support
 
 ## Architecture
 

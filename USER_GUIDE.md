@@ -23,6 +23,14 @@
 - **Credentials** are AES-256 encrypted and stored locally
 - **Delete a group**: choose to keep its connections (move to Ungrouped) or delete all
 
+### Group Ordering
+
+- Click the **Sort Groups** button (↕) in the sidebar toolbar to open the group ordering dialog
+- Groups are shown in a hierarchical list — select a group and use **↑ / ↓** to reorder it within its level
+- The display order is saved to your configuration and persisted across sessions
+- Click **Reset to A-Z** to restore alphabetical ordering
+- Groups not in the saved order list are placed at the end alphabetically
+
 ---
 
 ## Terminal Features
@@ -34,6 +42,7 @@
 - **Right-click a tab** for context menu with split options
 - Click **Unsplit All** to restore single-pane layout
 - Tabs can be reordered by dragging within a notebook
+- **Tab switch auto-focus** — clicking any connection tab (including the same tab repeatedly, in split panes, etc.) always focuses the terminal for keyboard input
 
 ### Font Zoom
 
@@ -153,6 +162,47 @@ When sending or copying, a dialog prompts to fill in each variable before the co
 
 ---
 
+## AI Assistant
+
+Toggle the AI panel with the **AI button** in the header bar.
+
+### Configuration
+
+Open **Preferences → AI Assistant**:
+
+| Setting | Description |
+|---|---|
+| **Provider** | `OpenAI / Compatible` or `Anthropic Claude` |
+| **API Key** | Your API key (`sk-…` or `sk-ant-…`) |
+| **API Base URL** | Endpoint URL — auto-prefixes `https://` if missing |
+| **Model** | Type a model name or click **Fetch** to list available models from the API |
+| **System Prompt** | Custom default system prompt for AI conversations (leave blank for built-in default) |
+| **Test Connection** | Click **🔗 Test Connection** to verify API key, endpoint, and model are working |
+
+Works with OpenAI, Claude, Ollama, LM Studio, Groq, and any OpenAI-compatible endpoint.
+
+### Features
+
+- **Markdown rendering** — responses display headers, bold, italic, inline code, lists, and fenced code blocks
+- **▶ Paste to terminal** — click the Paste button on any code block to insert the command into the active terminal
+- **Auto-reference terminal selection** — select text in the terminal, type your question, and click Send. The selected text is automatically captured and sent as a "📎 Terminal Reference" block alongside your question — no extra button click needed
+- **Manual quoting** — you can also manually set the reference by calling the quote action; click ✕ on the reference block to clear it before sending
+- **Edit & rewind** — click **✏️ Edit** on any user message to rewind the conversation to that point and re-send a modified message
+- **Custom system prompt** — configure a default system prompt in Preferences → AI Assistant to tailor the AI’s behaviour
+
+---
+
+## Terminal Screenshot
+
+Right-click a terminal → **Copy Screenshot of Selection**, or use the context menu.
+
+- Screenshots **preserve terminal ANSI colours** by parsing VTE HTML export for per-character colour information, then rendering with Cairo/PangoCairo
+- Falls back to WidgetPaintable capture, then plain-text rendering with configured foreground/background colours
+- Configure a **watermark** in Preferences → Screenshot — the text appears semi-transparently in the bottom-right corner
+- On macOS, the screenshot is copied to the system pasteboard via `osascript`
+
+---
+
 ## Advanced Features
 
 ### Port Forwarding
@@ -230,6 +280,7 @@ Access via **Menu → Backup All / Restore All**.
 
 - **Global settings** in Preferences: font family & size, foreground/background color, cursor shape, scrollback lines
 - **Per-connection overrides**: font and colors in connection properties → **Appearance** tab — these override the global defaults for that connection only
+- **Scroll-wheel protection** — numeric spinners and dropdown selectors throughout the app ignore mouse scroll events to prevent accidental value changes
 
 ---
 

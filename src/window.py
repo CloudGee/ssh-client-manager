@@ -32,6 +32,7 @@ from .session_recorder import (
     RecordingListDialog,
     get_recordings_dir,
 )
+from .ai_assistant import AIChatPanel
 
 
 class MainWindow(Adw.ApplicationWindow):
@@ -165,6 +166,9 @@ class MainWindow(Adw.ApplicationWindow):
             "clear": lambda *_: self._active_terminal_action("reset_terminal", True),
             "toggle-log": self._on_toggle_log,
             "toggle-record": self._on_toggle_record,
+            "screenshot": self._on_terminal_screenshot,
+            "ai-ask": self._on_ai_ask,
+            "ai-quote": self._on_ai_quote,
         }
         for name, callback in term_actions.items():
             action = Gio.SimpleAction(name=name)
@@ -190,13 +194,41 @@ class MainWindow(Adw.ApplicationWindow):
         self.paned.set_position(self.config["sidebar_width"])
 
         # Sidebar
-        self.sidebar = Sidebar(self.connection_manager, self.credential_store)
+        self.sidebar = Sidebar(
+            self.connection_manager, self.credential_store, self.config
+        )
 
         # Terminal panel
         self.terminal_panel = TerminalPanel(self.config)
 
+        # AI chat panel (embedded, hidden by default)
+        self._ai_panel = AIChatPanel(self.config)
+        self._ai_panel.set_visible(False)
+        self._ai_panel.connect("close-requested", self._on_ai_panel_close)
+        self._ai_panel.connect("paste-to-terminal", self._on_ai_paste_to_terminal)
+
+        # Provide the AI panel a way to fetch terminal selection at send time
+        def _provide_selection(callback):
+            terminal = self.terminal_panel.focused_terminal
+            if terminal is None:
+                callback("")
+                return
+            terminal.get_selected_text_async(callback)
+
+        self._ai_panel.set_selection_provider(_provide_selection)
+
+        # Wrap terminal + AI panel in a horizontal paned
+        self._right_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        self._right_paned.set_start_child(self.terminal_panel)
+        self._right_paned.set_end_child(self._ai_panel)
+        self._right_paned.set_shrink_start_child(False)
+        self._right_paned.set_shrink_end_child(False)
+        self._right_paned.set_resize_start_child(True)
+        self._right_paned.set_resize_end_child(False)
+        self._right_paned.set_wide_handle(True)
+
         self.paned.set_start_child(self.sidebar)
-        self.paned.set_end_child(self.terminal_panel)
+        self.paned.set_end_child(self._right_paned)
 
         # Keep the sidebar from being resizable to collapse
         self.paned.set_shrink_start_child(False)
@@ -265,11 +297,18 @@ class MainWindow(Adw.ApplicationWindow):
         self._cluster_button = btn_cluster
         header.pack_end(btn_cluster)
 
-        # Help / Usage Guide button — right next to Cluster so it's always visible
+        # Help / Usage Guide button
         btn_help = Gtk.Button(icon_name="help-about-symbolic")
         btn_help.set_tooltip_text("Usage Guide")
         btn_help.set_action_name("win.help")
         header.pack_end(btn_help)
+
+        # AI Assistant toggle button — next to Help
+        self._ai_button = Gtk.ToggleButton()
+        self._ai_button.set_icon_name("user-available-symbolic")
+        self._ai_button.set_tooltip_text("AI Assistant")
+        self._ai_button.connect("toggled", self._on_ai_button_toggled)
+        header.pack_end(self._ai_button)
 
         # App menu
         menu_button = Gtk.MenuButton()
@@ -971,7 +1010,11 @@ class MainWindow(Adw.ApplicationWindow):
                     json_data = f.read()
                 self._show_import_mode_dialog(json_data)
         except Exception as e:
-            self._set_status(f"Import failed: {e}")
+            if "dismiss" not in str(e).lower():
+                self._set_status(f"Import failed: {e}")
+        finally:
+            GLib.idle_add(self._force_redraw)
+            GLib.timeout_add(300, self._force_redraw)
 
     def _show_import_mode_dialog(self, json_data: str):
         """Show dialog asking user to overwrite or append connections."""
@@ -1040,7 +1083,11 @@ class MainWindow(Adw.ApplicationWindow):
                     f.write(data)
                 self._set_status("Connections exported (with credentials)")
         except Exception as e:
-            self._set_status(f"Export failed: {e}")
+            if "dismiss" not in str(e).lower():
+                self._set_status(f"Export failed: {e}")
+        finally:
+            GLib.idle_add(self._force_redraw)
+            GLib.timeout_add(300, self._force_redraw)
 
     def _on_import_chooser_response(self, chooser, response):
         if response == Gtk.ResponseType.ACCEPT:
@@ -2135,6 +2182,9 @@ class MainWindow(Adw.ApplicationWindow):
             except Exception as e:
                 if "dismiss" not in str(e).lower():
                     self._set_status(f"Export failed: {e}")
+            finally:
+                GLib.idle_add(self._force_redraw)
+                GLib.timeout_add(300, self._force_redraw)
 
         fc.save(parent_dialog, None, _on_save)
 
@@ -2191,6 +2241,9 @@ class MainWindow(Adw.ApplicationWindow):
             except Exception as e:
                 if "dismiss" not in str(e).lower():
                     self._set_status(f"Import failed: {e}")
+            finally:
+                GLib.idle_add(self._force_redraw)
+                GLib.timeout_add(300, self._force_redraw)
 
         fc.open(parent_dialog, None, _on_open)
 
@@ -2227,6 +2280,7 @@ class MainWindow(Adw.ApplicationWindow):
                     self._set_status(f"Backup failed: {e}")
             finally:
                 GLib.idle_add(self._force_redraw)
+                GLib.timeout_add(300, self._force_redraw)
 
         fc.save(parent_dialog, None, _on_save)
 
@@ -2289,14 +2343,25 @@ class MainWindow(Adw.ApplicationWindow):
             finally:
                 # Force redraw to clear any FileDialog rendering artifacts
                 GLib.idle_add(self._force_redraw)
+                # Second pass after a short delay for stubborn tooltips
+                GLib.timeout_add(300, self._force_redraw)
 
         fc.open(parent_dialog, None, _on_open)
 
     def _force_redraw(self):
-        """Force a full window redraw to clear rendering artifacts."""
+        """Force a full window redraw to clear rendering artifacts.
+
+        On macOS, GTK4 FileDialog tooltips can survive after the dialog
+        closes, leaving a floating label on screen.  Toggling has-tooltip
+        on the sidebar tree and queueing redraws clears them.
+        """
+        # Toggle tooltip on sidebar tree to dismiss stale tooltips
+        tree = getattr(self.sidebar, "tree_view", None)
+        if tree is not None:
+            tree.set_has_tooltip(True)
+            tree.set_has_tooltip(False)
         self.queue_draw()
-        # Toggle a harmless property to force the compositor to refresh
-        for child in [self.paned, self.terminal_panel]:
+        for child in [self.paned, self.terminal_panel, self.sidebar]:
             child.queue_draw()
         return False
 
@@ -2367,6 +2432,74 @@ class MainWindow(Adw.ApplicationWindow):
         # Only act if the button state differs from the actual recording state
         if button.get_active() != is_recording:
             self._on_toggle_record()
+
+    # ── AI Assistant & Screenshot ──────────────────────────────────────────
+
+    def _on_terminal_screenshot(self, *_):
+        """Copy a screenshot of the selected (or visible) terminal content."""
+        terminal = self.terminal_panel.focused_terminal
+        if terminal is None:
+            return
+        terminal.screenshot_selection_to_clipboard()
+        self._set_status("📷 Screenshot copied to clipboard")
+
+    def _on_ai_button_toggled(self, button):
+        """Handle AI toggle button in header bar."""
+        show = button.get_active()
+        self._toggle_ai_panel(show)
+
+    def _on_ai_panel_close(self, *_):
+        """Handle the × button inside the AI panel."""
+        self._toggle_ai_panel(False)
+
+    def _on_ai_paste_to_terminal(self, panel, text):
+        """Handle paste-to-terminal signal from AI panel code blocks."""
+        terminal = self.terminal_panel.focused_terminal
+        if terminal is None:
+            self._set_status("⚠ No active terminal for paste")
+            return
+        clean = text.strip()
+        terminal.feed_child(clean)
+        self._set_status("▶ Command pasted to terminal")
+
+    def _toggle_ai_panel(self, show: bool):
+        """Show or hide the AI side panel."""
+        self._ai_panel.set_visible(show)
+        # Sync header button state without re-triggering
+        self._ai_button.handler_block_by_func(self._on_ai_button_toggled)
+        self._ai_button.set_active(show)
+        self._ai_button.handler_unblock_by_func(self._on_ai_button_toggled)
+        if show:
+            # Set the paned position so the AI panel gets ~380 px
+            alloc = self._right_paned.get_allocation()
+            if alloc.width > 400:
+                self._right_paned.set_position(alloc.width - 380)
+            self._ai_panel.focus_input()
+
+    def _on_ai_ask(self, *_):
+        """Toggle the AI assistant side panel and quote selection."""
+        if not self._ai_panel.get_visible():
+            self._toggle_ai_panel(True)
+        self._quote_selection_to_ai()
+
+    def _on_ai_quote(self, *_):
+        """Quote the terminal selection into the AI chat input."""
+        if not self._ai_panel.get_visible():
+            self._toggle_ai_panel(True)
+        self._quote_selection_to_ai()
+
+    def _quote_selection_to_ai(self):
+        """Quote the current terminal selection into the AI chat reference block."""
+        terminal = self.terminal_panel.focused_terminal
+        if terminal is None:
+            return
+
+        def _do_quote(text):
+            if text and text.strip():
+                self._ai_panel.quote_terminal_selection(text)
+            self._ai_panel.focus_input()
+
+        terminal.get_selected_text_async(_do_quote)
 
     def _update_record_button(self):
         """Sync the header bar record button with the active terminal's recording state."""
