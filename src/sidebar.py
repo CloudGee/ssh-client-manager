@@ -251,11 +251,34 @@ class Sidebar(Gtk.Box):
                     )
                     group_iters[current_path] = iter_
 
-        # Sort: favorites first, then alphabetical
-        sorted_conns = sorted(
-            connections,
-            key=lambda c: (not getattr(c, "favorite", False), c.name.lower()),
-        )
+        # Sort connections within each group using saved order
+        conn_order = self.config.get("connection_order", {}) if self.config else {}
+
+        # Group connections by their group path
+        conns_by_group: dict[str, list] = {}
+        for conn in connections:
+            g = conn.group or ""
+            conns_by_group.setdefault(g, []).append(conn)
+
+        # Sort each group: custom order first, then favorites, then alphabetical
+        sorted_conns: list = []
+        for g, conns in conns_by_group.items():
+            order_list = conn_order.get(g, [])
+            if order_list:
+                order_idx = {cid: i for i, cid in enumerate(order_list)}
+                conns.sort(
+                    key=lambda c: (
+                        0 if c.id in order_idx else 1,
+                        order_idx.get(c.id, 0),
+                        not getattr(c, "favorite", False),
+                        c.name.lower(),
+                    )
+                )
+            else:
+                conns.sort(
+                    key=lambda c: (not getattr(c, "favorite", False), c.name.lower())
+                )
+            sorted_conns.extend(conns)
 
         # Add connections
         for conn in sorted_conns:
@@ -479,6 +502,7 @@ class Sidebar(Gtk.Box):
     def _on_dnd_motion(self, target, x, y):
         """Highlight potential drop target during drag."""
         drag_group = getattr(self, "_drag_group_path", None)
+        drag_conn = getattr(self, "_drag_conn_id", None)
         path_info = self.tree_view.get_path_at_pos(int(x), int(y))
         if path_info:
             path = path_info[0]
@@ -492,6 +516,10 @@ class Sidebar(Gtk.Box):
                     )
                     if self._group_is_ancestor(drag_group, target_group_path):
                         return None
+                self.tree_view.set_cursor(path, None, False)
+                return Gdk.DragAction.MOVE
+            elif drag_conn:
+                # Dragging a connection over another connection — allow reorder
                 self.tree_view.set_cursor(path, None, False)
                 return Gdk.DragAction.MOVE
         return Gdk.DragAction.MOVE  # Allow drop on empty space (root level)
@@ -510,12 +538,13 @@ class Sidebar(Gtk.Box):
             return self._handle_conn_drop(value, x, y)
 
     def _handle_conn_drop(self, conn_id: str, x: float, y: float) -> bool:
-        """Move a connection to the target group."""
+        """Move a connection to the target group, or reorder within the same group."""
         conn = self.connection_manager.get_connection(conn_id)
         if not conn:
             return False
 
         target_group = ""
+        drop_on_conn_id = None
         path_info = self.tree_view.get_path_at_pos(int(x), int(y))
         if path_info:
             path = path_info[0]
@@ -524,15 +553,84 @@ class Sidebar(Gtk.Box):
             if is_group:
                 target_group = self.filter_model.get_value(iter_, COL_GROUP_PATH)
             else:
-                # Dropped on a connection — use that connection's group
+                # Dropped on a connection
                 target_group = self.filter_model.get_value(iter_, COL_GROUP_PATH) or ""
+                drop_on_conn_id = self.filter_model.get_value(iter_, COL_CONNECTION_ID)
 
-        if conn.group != target_group:
+        source_group = conn.group or ""
+
+        if source_group != target_group:
+            # Moving to a different group
             conn.group = target_group
             self.connection_manager.update_connection(conn)
+            # Remove from old group order, add to end of new group order
+            self._remove_from_connection_order(conn_id, source_group)
+            if drop_on_conn_id:
+                self._insert_connection_before(conn_id, drop_on_conn_id, target_group)
+            self.refresh()
+        elif drop_on_conn_id and drop_on_conn_id != conn_id:
+            # Reordering within the same group
+            self._reorder_connection(conn_id, drop_on_conn_id, target_group)
             self.refresh()
 
         return True
+
+    def _get_group_conn_order(self, group: str) -> list[str]:
+        """Get the current ordered list of connection IDs for a group.
+
+        If no saved order exists, build one from the current display order.
+        """
+        conn_order = self.config.get("connection_order", {}) if self.config else {}
+        order = conn_order.get(group)
+        if order is not None:
+            return list(order)
+        # Build default order: favorites first, then alphabetical
+        conns = self.connection_manager.get_connections_in_group(group)
+        conns.sort(key=lambda c: (not getattr(c, "favorite", False), c.name.lower()))
+        return [c.id for c in conns]
+
+    def _save_group_conn_order(self, group: str, order: list[str]):
+        """Persist the connection order for a group."""
+        if not self.config:
+            return
+        conn_order = dict(self.config.get("connection_order", {}))
+        conn_order[group] = order
+        self.config.set("connection_order", conn_order)
+
+    def _remove_from_connection_order(self, conn_id: str, group: str):
+        """Remove a connection from a group's saved order."""
+        if not self.config:
+            return
+        conn_order = dict(self.config.get("connection_order", {}))
+        if group in conn_order:
+            conn_order[group] = [cid for cid in conn_order[group] if cid != conn_id]
+            self.config.set("connection_order", conn_order)
+
+    def _insert_connection_before(self, conn_id: str, before_conn_id: str, group: str):
+        """Insert conn_id before before_conn_id in the group's order."""
+        order = self._get_group_conn_order(group)
+        # Remove if already present
+        order = [cid for cid in order if cid != conn_id]
+        # Find insertion point
+        try:
+            idx = order.index(before_conn_id)
+        except ValueError:
+            idx = len(order)
+        order.insert(idx, conn_id)
+        self._save_group_conn_order(group, order)
+
+    def _reorder_connection(self, drag_id: str, drop_on_id: str, group: str):
+        """Reorder: move drag_id to just before drop_on_id within the same group."""
+        order = self._get_group_conn_order(group)
+        # Remove dragged item
+        order = [cid for cid in order if cid != drag_id]
+        # Insert before the drop target
+        try:
+            idx = order.index(drop_on_id)
+        except ValueError:
+            idx = len(order)
+        order.insert(idx, drag_id)
+        self._save_group_conn_order(group, order)
 
     def _handle_group_drop(self, drag_group_path: str, x: float, y: float) -> bool:
         """Move a group to be a child of the target group (or to root level)."""

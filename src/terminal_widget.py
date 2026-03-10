@@ -1038,9 +1038,15 @@ class TerminalWidget(Gtk.Box):
         popover.set_pointing_to(rect)
 
         def _on_closed(_p):
-            _p.unparent()
-            if self._context_popover is _p:
-                self._context_popover = None
+            # Delay unparent so the action is dispatched before the popover
+            # leaves the widget tree (GTK4 fires "closed" before "activate").
+            def _cleanup():
+                _p.unparent()
+                if self._context_popover is _p:
+                    self._context_popover = None
+                return False
+
+            GLib.idle_add(_cleanup)
 
         popover.connect("closed", _on_closed)
         self._context_popover = popover

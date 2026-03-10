@@ -2611,6 +2611,9 @@ class MainWindow(Adw.ApplicationWindow):
             "• Drag-and-drop connections or entire groups onto other groups to reorganize them; drag to empty space to move to root level"
         )
         insert_body(
+            "• Drag-and-drop connections within the same group to reorder them — the custom order is saved automatically"
+        )
+        insert_body(
             "• Right-click sidebar for context menu: connect, edit, duplicate, delete, open SFTP"
         )
         insert_body("• Favorites — mark connections for quick access")

@@ -91,6 +91,9 @@ DEFAULTS = {
     "vnc_default_quality": "high",
     # Group display order (flat list of group paths in preferred order)
     "group_order": [],
+    # Connection display order within each group
+    # Dict mapping group path ("" for root) to list of connection IDs
+    "connection_order": {},
 }
 
 

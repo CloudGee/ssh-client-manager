@@ -168,9 +168,7 @@ class AIChatPanel(Gtk.Box):
 
         self._entry = Gtk.Entry()
         self._entry.set_hexpand(True)
-        self._entry.set_placeholder_text(
-            "Select terminal text and Ask about terminal AI"
-        )
+        self._entry.set_placeholder_text("Select terminal text and Ask about terminal")
         self._entry.connect("activate", self._on_send)
         input_box.append(self._entry)
 

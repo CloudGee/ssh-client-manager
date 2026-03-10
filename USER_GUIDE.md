@@ -16,6 +16,7 @@
 - SSH, SFTP, RDP, and VNC protocols supported
 - Organize connections into **groups and subgroups** — use `/` in the group field for nesting (e.g. `Work/Dev`)
 - **Drag-and-drop** connections or entire groups onto other groups to reorganize them; drag to empty space to move to root level
+- **Drag-and-drop** connections within the same group to reorder them — the custom order is saved automatically
 - **Right-click** the sidebar for context menu: connect, edit, duplicate, delete, open SFTP
 - **Favorites** — mark connections for quick access
 - **Tags** — add comma-separated tags for categorization and filtering

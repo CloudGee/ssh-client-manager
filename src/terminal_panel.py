@@ -128,7 +128,7 @@ class TabLabel(Gtk.Box):
 
         popover = Gtk.PopoverMenu(menu_model=menu_model)
         popover.set_parent(self)
-        popover.connect("closed", lambda p: p.unparent())
+        popover.connect("closed", lambda p: GLib.idle_add(p.unparent))
         popover.popup()
 
 
