@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=SSH Client Manager
+GenericName=SSH Connection Manager
+Comment=Modern GTK4 SSH client with split terminals and encrypted credentials
+Exec=/usr/bin/ssh-client-manager
+Icon=io.github.ssh-client-manager
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=ssh;terminal;remote;server;connection;
+StartupNotify=true
+StartupWMClass=SSHClientManager

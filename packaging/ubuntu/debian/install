@@ -1,0 +1,5 @@
+usr/lib/ssh-client-manager /usr/lib
+usr/bin/ssh-client-manager /usr/bin
+usr/share/applications /usr/share
+usr/share/metainfo /usr/share
+usr/share/icons /usr/share

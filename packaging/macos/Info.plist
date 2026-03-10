@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>SSHClientManager</string>
+
+    <key>CFBundleDisplayName</key>
+    <string>SSH Client Manager</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>io.github.ssh-client-manager</string>
+
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <key>CFBundleSignature</key>
+    <string>????</string>
+
+    <key>CFBundleExecutable</key>
+    <string>SSHClientManager</string>
+
+    <key>CFBundleIconFile</key>
+    <string>sshclientmanager.icns</string>
+
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+
+    <key>NSHighResolutionCapable</key>
+    <true/>
+
+    <key>NSHumanReadableCopyright</key>
+    <string>© 2026 SSH Client Manager Contributors</string>
+
+    <!-- Allow outbound SSH connections -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+
+    <!-- Required for SSH_ASKPASS subprocess spawning -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>SSH Client Manager needs to spawn helper processes for SSH authentication.</string>
+
+    <key>LSUIElement</key>
+    <false/>
+
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.developer-tools</string>
+</dict>
+</plist>

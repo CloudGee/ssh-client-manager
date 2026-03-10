@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.ssh-client-manager</id>
+  <name>SSH Client Manager</name>
+  <summary>Modern GTK4 SSH client with split terminals</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <description>
+    <p>
+      SSH Client Manager is a modern, feature-rich SSH connection manager
+      built with GTK4 and libadwaita. It offers a clean GNOME-style interface
+      with powerful features for managing multiple SSH sessions.
+    </p>
+    <ul>
+      <li>Split terminals — horizontal and vertical pane splitting</li>
+      <li>Tabbed interface with drag-and-drop between panes</li>
+      <li>AES-encrypted credential storage (no keyring required)</li>
+      <li>SSH_ASKPASS-based authentication — no expect dependency</li>
+      <li>Cluster mode — broadcast commands to all open terminals</li>
+      <li>Hierarchical connection grouping</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.ssh-client-manager.desktop</launchable>
+
+  <url type="homepage">https://github.com/your-org/ssh-client-manager</url>
+  <url type="bugtracker">https://github.com/your-org/ssh-client-manager/issues</url>
+
+  <provides>
+    <binary>ssh-client-manager</binary>
+  </provides>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+
+  <categories>
+    <category>Network</category>
+    <category>RemoteAccess</category>
+  </categories>
+
+  <releases>
+    <release version="1.0.0" date="2026-03-06">
+      <description>
+        <p>Initial release.</p>
+      </description>
+    </release>
+  </releases>
+
+  <content_rating type="oars-1.1"/>
+</component>

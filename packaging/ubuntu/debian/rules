@@ -1,0 +1,36 @@
+#!/usr/bin/make -f
+# debian/rules — Debhelper build rules for ssh-client-manager
+
+%:
+	dh $@ --with python3
+
+override_dh_auto_install:
+	# Install the launcher script
+	install -D -m 755 run.py \
+		debian/ssh-client-manager/usr/bin/ssh-client-manager
+
+	# Install application Python source package
+	install -d debian/ssh-client-manager/usr/lib/ssh-client-manager
+	cp -a src/ debian/ssh-client-manager/usr/lib/ssh-client-manager/src/
+	cp run.py debian/ssh-client-manager/usr/lib/ssh-client-manager/
+
+	# Install desktop entry
+	install -D -m 644 \
+		packaging/ubuntu/io.github.ssh-client-manager.desktop \
+		debian/ssh-client-manager/usr/share/applications/io.github.ssh-client-manager.desktop
+
+	# Install AppStream metadata
+	install -D -m 644 \
+		packaging/ubuntu/io.github.ssh-client-manager.metainfo.xml \
+		debian/ssh-client-manager/usr/share/metainfo/io.github.ssh-client-manager.metainfo.xml
+
+	# Install icon (scalable SVG)
+	install -d debian/ssh-client-manager/usr/share/icons/hicolor/scalable/apps
+	# Placeholder: add your SVG icon at resources/ssh-client-manager.svg
+	test -f resources/ssh-client-manager.svg && \
+		install -m 644 resources/ssh-client-manager.svg \
+		debian/ssh-client-manager/usr/share/icons/hicolor/scalable/apps/io.github.ssh-client-manager.svg \
+		|| true
+
+override_dh_python3:
+	dh_python3 --no-guessing-versions
