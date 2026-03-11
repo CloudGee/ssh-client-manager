@@ -79,7 +79,7 @@ DEFAULTS = {
     "ai_provider": "openai",  # "openai" or "claude"
     "ai_api_key": "",
     "ai_base_url": "https://api.openai.com/v1",
-    "ai_model": "gpt-4o-mini",
+    "ai_model": "",
     "ai_system_prompt": "",  # Custom system prompt (empty = use built-in default)
     # Screenshot
     "screenshot_watermark": "",  # Watermark text (empty = disabled)

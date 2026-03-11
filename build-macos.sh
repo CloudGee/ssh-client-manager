@@ -95,6 +95,7 @@ REQUIRED_BREW_PACKAGES=(
     "gdk-pixbuf"
     "graphene"
     "harfbuzz"
+    "adwaita-icon-theme"
 )
 
 # Optional packages
