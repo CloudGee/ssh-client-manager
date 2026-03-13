@@ -9,6 +9,7 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 from pathlib import Path
 import gi
 
@@ -87,6 +88,7 @@ class MainWindow(Adw.ApplicationWindow):
         # Auto-reconnect attempt tracking: terminal id → attempt count
         self._reconnect_attempts: dict = {}
         self._reconnect_timers: dict = {}
+        self._hostkey_accept_new_once: set[str] = set()
         self._recently_closed_tabs: list[dict] = []
         self._hotkey_pending_first: str | None = None
         self._hotkey_pending_timeout_id = 0
@@ -488,90 +490,247 @@ class MainWindow(Adw.ApplicationWindow):
                     parts = shlex.split(" ".join(cmd.splitlines()))
                 except ValueError:
                     parts = cmd.split()
-
-                i = 0
-                positional = []
-                option_with_value = {
-                    "-p",
-                    "-P",
-                    "-i",
-                    "-o",
-                    "-F",
-                    "-J",
-                    "-L",
-                    "-R",
-                    "-D",
-                    "-W",
-                    "-w",
-                    "-S",
-                    "-b",
-                    "-c",
-                    "-m",
-                }
-                while i < len(parts):
-                    part = parts[i]
-                    if part in ("-p", "-P") and i + 1 < len(parts):
-                        try:
-                            port = int(parts[i + 1])
-                        except ValueError:
-                            pass
-                        i += 2
-                        continue
-                    if part in option_with_value and i + 1 < len(parts):
-                        i += 2
-                        continue
-                    if part.startswith("-"):
-                        i += 1
-                        continue
-                    if part not in ("ssh", "sftp"):
-                        positional.append(part)
-                    i += 1
-
-                if positional:
-                    dest = positional[-1]
-                    if "@" in dest:
-                        _, dest = dest.split("@", 1)
-                    host, parsed_port = self._parse_host_port(dest, port)
-                    port = parsed_port
+                host, port = self._extract_host_port_from_argv(parts, port)
 
         host = host.strip().strip("[]")
         return host, port
 
     @staticmethod
+    def _extract_host_port_from_argv(
+        argv: list[str], default_port: int = 22
+    ) -> tuple[str, int]:
+        """Extract destination host/port from ssh/sftp argv list."""
+        port = default_port
+        i = 0
+        positional = []
+        option_with_value = {
+            "-p",
+            "-P",
+            "-i",
+            "-o",
+            "-F",
+            "-J",
+            "-L",
+            "-R",
+            "-D",
+            "-W",
+            "-w",
+            "-S",
+            "-b",
+            "-c",
+            "-m",
+        }
+        while i < len(argv):
+            part = argv[i]
+            if part in ("-p", "-P") and i + 1 < len(argv):
+                try:
+                    port = int(argv[i + 1])
+                except ValueError:
+                    pass
+                i += 2
+                continue
+            if part in option_with_value and i + 1 < len(argv):
+                i += 2
+                continue
+            if part.startswith("-"):
+                i += 1
+                continue
+            if part not in ("ssh", "sftp"):
+                positional.append(part)
+            i += 1
+
+        if not positional:
+            return "", port
+
+        dest = positional[-1]
+        if "@" in dest:
+            _, dest = dest.split("@", 1)
+        host, parsed_port = MainWindow._parse_host_port(dest, port)
+        return host.strip().strip("[]"), parsed_port
+
+    def _extract_proxy_targets_from_connection(self, conn) -> list[tuple[str, int]]:
+        """Extract proxy/jump hosts that may need known_hosts trust first."""
+        targets: list[tuple[str, int]] = []
+
+        def _add_target(token: str, default_port: int = 22):
+            value = (token or "").strip()
+            if not value:
+                return
+            if "@" in value:
+                _, value = value.rsplit("@", 1)
+            host, port = self._parse_host_port(value, default_port)
+            host = host.strip().strip("[]")
+            if host:
+                targets.append((host, port))
+
+        def _parse_proxy_command(cmd_text: str):
+            text = (cmd_text or "").strip()
+            if not text:
+                return
+            for prefix in ("ProxyCommand=", "ProxyCommand "):
+                if text.startswith(prefix):
+                    text = text[len(prefix) :].strip()
+                    break
+            try:
+                parts = shlex.split(" ".join(text.splitlines()))
+            except ValueError:
+                parts = text.split()
+            host, port = self._extract_host_port_from_argv(parts, 22)
+            if host:
+                targets.append((host, port))
+
+        jump_value = (getattr(conn, "jump_host", "") or "").strip()
+        if jump_value:
+            is_proxy_cmd = (
+                jump_value.startswith("ssh ")
+                or jump_value.startswith("/")
+                or "-W " in jump_value
+                or "-W%" in jump_value
+                or "ProxyCommand" in jump_value
+            )
+            if is_proxy_cmd:
+                _parse_proxy_command(jump_value)
+            else:
+                for hop in jump_value.split(","):
+                    _add_target(hop, 22)
+
+        cmd = (getattr(conn, "command", "") or "").strip()
+        if cmd:
+            try:
+                parts = shlex.split(" ".join(cmd.splitlines()))
+            except ValueError:
+                parts = cmd.split()
+
+            i = 0
+            while i < len(parts):
+                part = parts[i]
+                if part == "-J" and i + 1 < len(parts):
+                    for hop in parts[i + 1].split(","):
+                        _add_target(hop, 22)
+                    i += 2
+                    continue
+                if part == "-o" and i + 1 < len(parts):
+                    opt = parts[i + 1]
+                    if opt.startswith("ProxyCommand="):
+                        _parse_proxy_command(opt)
+                    i += 2
+                    continue
+                if part.startswith("-oProxyCommand="):
+                    _parse_proxy_command(part[2:])
+                i += 1
+
+        deduped: list[tuple[str, int]] = []
+        seen: set[str] = set()
+        for host, port in targets:
+            key = self._known_hosts_lookup_token(host, port)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append((host, port))
+        return deduped
+
+    def _build_host_key_targets(self, conn) -> list[tuple[str, int, bool]]:
+        """Return (host, port, required_scan_success) targets for pre-trust."""
+        targets: list[tuple[str, int, bool]] = []
+
+        proxy_targets = self._extract_proxy_targets_from_connection(conn)
+        for host, port in proxy_targets:
+            targets.append((host, port, True))
+
+        final_host, final_port = self._extract_host_port_from_connection(conn, 22)
+        if final_host:
+            # Through proxy chains, the final host may be unreachable from local machine.
+            required = len(proxy_targets) == 0
+            targets.append((final_host, final_port, required))
+
+        merged: dict[str, tuple[str, int, bool]] = {}
+        for host, port, required in targets:
+            key = self._known_hosts_lookup_token(host, port)
+            if key in merged:
+                old_host, old_port, old_required = merged[key]
+                merged[key] = (old_host, old_port, old_required or required)
+            else:
+                merged[key] = (host, port, required)
+        return list(merged.values())
+
+    @staticmethod
     def _known_hosts_lookup_token(host: str, port: int) -> str:
         return host if port == 22 else f"[{host}]:{port}"
+
+    def _mark_accept_new_once(self, conn) -> None:
+        """Mark connection to use one-shot StrictHostKeyChecking=accept-new."""
+        conn_id = getattr(conn, "id", "") or ""
+        if conn_id:
+            self._hostkey_accept_new_once.add(conn_id)
+
+    def _apply_hostkey_overrides_once(self, conn, cmd: list[str]) -> list[str]:
+        """Apply one-shot host-key override options when prefetch was incomplete."""
+        conn_id = getattr(conn, "id", "") or ""
+        if not conn_id or conn_id not in self._hostkey_accept_new_once:
+            return cmd
+
+        has_strict_option = False
+        for i, part in enumerate(cmd):
+            if part == "-o" and i + 1 < len(cmd):
+                if cmd[i + 1].startswith("StrictHostKeyChecking="):
+                    has_strict_option = True
+                    break
+            if part.startswith("-oStrictHostKeyChecking="):
+                has_strict_option = True
+                break
+
+        if not has_strict_option:
+            cmd = list(cmd) + ["-o", "StrictHostKeyChecking=accept-new"]
+
+        self._hostkey_accept_new_once.discard(conn_id)
+        return cmd
 
     def _ensure_host_key_acceptance(
         self, conn, on_ready, *, replace_existing: bool = False
     ):
         """Ensure host key exists in known_hosts before opening SSH/SFTP connection."""
-        host, port = self._extract_host_port_from_connection(conn, 22)
-        if not host:
+        targets = self._build_host_key_targets(conn)
+        if not targets:
             on_ready()
             return
 
         ssh_dir = Path.home() / ".ssh"
         known_hosts = ssh_dir / "known_hosts"
-        lookup = self._known_hosts_lookup_token(host, port)
 
-        if not replace_existing:
+        pending: list[tuple[str, int, bool]] = []
+        for host, port, required in targets:
+            lookup = self._known_hosts_lookup_token(host, port)
+            if replace_existing:
+                pending.append((host, port, required))
+                continue
             lookup_cmd = ["ssh-keygen", "-F", lookup, "-f", str(known_hosts)]
             lookup_result = subprocess.run(lookup_cmd, capture_output=True, text=True)
             if lookup_result.returncode == 0 and lookup_result.stdout.strip():
-                on_ready()
-                return
+                continue
+            pending.append((host, port, required))
+
+        if not pending:
+            on_ready()
+            return
+
+        missing_lines = [
+            f"• {self._known_hosts_lookup_token(host, port)}"
+            for host, port, _required in pending
+        ]
 
         heading = "Host Key Verification"
         if replace_existing:
             body = (
-                f"Detected host key verification failure for {lookup}.\n\n"
+                "Detected host key verification failure.\n\n"
                 "The server key may have changed.\n"
-                "Do you want to trust the current key and reconnect?"
+                "Do you want to trust the current key and reconnect?\n\n"
+                "Targets:\n" + "\n".join(missing_lines)
             )
         else:
             body = (
-                f"First connection to {lookup}.\n\n"
-                "Accept this host key and add it to known_hosts?"
+                "First connection requires host key trust.\n\n"
+                "Accept and add these keys to known_hosts?\n\n"
+                "Targets:\n" + "\n".join(missing_lines)
             )
 
         dialog = Adw.MessageDialog(
@@ -583,48 +742,110 @@ class MainWindow(Adw.ApplicationWindow):
         dialog.add_response("accept", "Accept and Connect")
         dialog.set_response_appearance("accept", Adw.ResponseAppearance.SUGGESTED)
 
-        def _on_response(_d, response):
-            if response != "accept":
-                return
+        def _finish_after_scan(
+            keys_to_append: list[str], failed: list[tuple[str, str, bool]]
+        ) -> bool:
+            try:
+                if keys_to_append:
+                    with open(known_hosts, "a", encoding="utf-8") as f:
+                        for key_text in keys_to_append:
+                            if not key_text.endswith("\n"):
+                                key_text += "\n"
+                            f.write(key_text)
+            except OSError as exc:
+                self._set_status(f"Failed to update known_hosts: {exc}")
+                return False
 
+            required_failed = [item for item in failed if item[2]]
+            if required_failed:
+                failed_lines = "\n".join(
+                    f"• {lookup}: {err}" for lookup, err, _required in required_failed
+                )
+                warn = Adw.MessageDialog(
+                    transient_for=self,
+                    heading="Host Key Fetch Failed",
+                    body=(
+                        "Could not pre-fetch some required host keys.\n\n"
+                        f"{failed_lines}\n\n"
+                        "Continue anyway and let SSH verify interactively?"
+                    ),
+                )
+                warn.add_response("cancel", "Cancel")
+                warn.add_response("continue", "Continue")
+                warn.set_response_appearance(
+                    "continue", Adw.ResponseAppearance.SUGGESTED
+                )
+
+                def _on_warn_response(_dlg, response_id):
+                    if response_id == "continue":
+                        self._mark_accept_new_once(conn)
+                        self._set_status(
+                            "Continuing without preloaded host keys; SSH may ask for trust."
+                        )
+                        on_ready()
+
+                warn.connect("response", _on_warn_response)
+                warn.present()
+                return False
+
+            if failed:
+                self._mark_accept_new_once(conn)
+                self._set_status(
+                    "Some host keys were not preloaded; SSH may ask for trust during connect."
+                )
+            else:
+                accepted = ", ".join(
+                    self._known_hosts_lookup_token(host, port)
+                    for host, port, _required in pending
+                )
+                self._set_status(f"Host key accepted: {accepted}")
+            on_ready()
+            return False
+
+        def _scan_worker():
+            keys_to_append: list[str] = []
+            failed: list[tuple[str, str, bool]] = []
             try:
                 ssh_dir.mkdir(mode=0o700, exist_ok=True)
                 known_hosts.touch(mode=0o600, exist_ok=True)
 
-                if replace_existing:
-                    subprocess.run(
-                        ["ssh-keygen", "-R", host, "-f", str(known_hosts)],
+                for host, port, required in pending:
+                    lookup = self._known_hosts_lookup_token(host, port)
+                    if replace_existing:
+                        subprocess.run(
+                            ["ssh-keygen", "-R", host, "-f", str(known_hosts)],
+                            capture_output=True,
+                            text=True,
+                        )
+                        subprocess.run(
+                            ["ssh-keygen", "-R", lookup, "-f", str(known_hosts)],
+                            capture_output=True,
+                            text=True,
+                        )
+
+                    scan = subprocess.run(
+                        ["ssh-keyscan", "-T", "3", "-p", str(port), host],
                         capture_output=True,
                         text=True,
                     )
-                    subprocess.run(
-                        ["ssh-keygen", "-R", lookup, "-f", str(known_hosts)],
-                        capture_output=True,
-                        text=True,
-                    )
-
-                scan = subprocess.run(
-                    ["ssh-keyscan", "-T", "5", "-p", str(port), host],
-                    capture_output=True,
-                    text=True,
-                )
-                key_text = (scan.stdout or "").strip()
-                if scan.returncode != 0 or not key_text:
-                    err = (
-                        scan.stderr or scan.stdout or "Failed to fetch host key"
-                    ).strip()
-                    self._set_status(f"Host key fetch failed: {err}")
-                    return
-
-                with open(known_hosts, "a", encoding="utf-8") as f:
-                    if not key_text.endswith("\n"):
-                        key_text += "\n"
-                    f.write(key_text)
-
-                self._set_status(f"Host key accepted: {lookup}")
-                on_ready()
+                    key_text = (scan.stdout or "").strip()
+                    if scan.returncode != 0 or not key_text:
+                        err = (
+                            scan.stderr or scan.stdout or "Failed to fetch host key"
+                        ).strip()
+                        failed.append((lookup, err, required))
+                        continue
+                    keys_to_append.append(key_text)
             except OSError as exc:
-                self._set_status(f"Failed to update known_hosts: {exc}")
+                failed.append(("known_hosts", str(exc), True))
+
+            GLib.idle_add(_finish_after_scan, keys_to_append, failed)
+
+        def _on_response(_d, response):
+            if response != "accept":
+                return
+            self._set_status("Fetching host keys...")
+            threading.Thread(target=_scan_worker, daemon=True).start()
 
         dialog.connect("response", _on_response)
         dialog.present()
@@ -654,6 +875,7 @@ class MainWindow(Adw.ApplicationWindow):
         def _spawn():
             terminal = TerminalWidget(self.config, conn)
             ssh_cmd = self.ssh_handler.build_ssh_command(conn)
+            ssh_cmd = self._apply_hostkey_overrides_once(conn, ssh_cmd)
             env, session_id = self.ssh_handler.build_environment(conn)
             terminal._askpass_session_id = session_id
             title = conn.name or conn.display_name()
@@ -696,6 +918,7 @@ class MainWindow(Adw.ApplicationWindow):
         def _spawn():
             terminal = TerminalWidget(self.config, conn)
             sftp_cmd = self.ssh_handler.build_sftp_command(conn)
+            sftp_cmd = self._apply_hostkey_overrides_once(conn, sftp_cmd)
             env, session_id = self.ssh_handler.build_environment(conn)
             terminal._askpass_session_id = session_id
             title = f"SFTP: {conn.name or conn.display_name()}"
@@ -725,6 +948,7 @@ class MainWindow(Adw.ApplicationWindow):
         def _spawn():
             terminal = TerminalWidget(self.config, conn)
             sftp_cmd = self.ssh_handler.build_sftp_from_ssh(conn)
+            sftp_cmd = self._apply_hostkey_overrides_once(conn, sftp_cmd)
             env, session_id = self.ssh_handler.build_environment(conn)
             terminal._askpass_session_id = session_id
             title = f"SFTP: {conn.name or conn.display_name()}"
@@ -1687,6 +1911,7 @@ class MainWindow(Adw.ApplicationWindow):
 
             def _spawn_sftp():
                 sftp_cmd = self.ssh_handler.build_sftp_command(conn)
+                sftp_cmd = self._apply_hostkey_overrides_once(conn, sftp_cmd)
                 env, session_id = self.ssh_handler.build_environment(conn)
                 terminal._askpass_session_id = session_id
                 terminal.spawn_command(sftp_cmd, env)
@@ -1702,6 +1927,7 @@ class MainWindow(Adw.ApplicationWindow):
 
             def _spawn_ssh():
                 ssh_cmd = self.ssh_handler.build_ssh_command(conn)
+                ssh_cmd = self._apply_hostkey_overrides_once(conn, ssh_cmd)
                 env, session_id = self.ssh_handler.build_environment(conn)
                 terminal._askpass_session_id = session_id
                 terminal.spawn_command(ssh_cmd, env)

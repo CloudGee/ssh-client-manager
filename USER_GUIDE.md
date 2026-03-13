@@ -82,6 +82,10 @@
 - On first SSH/SFTP connection to a host, the app prompts whether to trust and add host key to `~/.ssh/known_hosts`
 - If host key verification fails (for example key changed), the app prompts to refresh the host key and reconnect
 - After accepting, connection is retried automatically
+- For ProxyCommand/ProxyJump chains, the app verifies jump/proxy hosts first and then the final host
+- Host key prefetch now runs in background (non-blocking), so the verification dialog no longer freezes the UI
+- If a proxied final host cannot be reached directly by `ssh-keyscan`, the app can continue and let OpenSSH perform interactive host-key verification during connection
+- In credential-injection sessions (SSH_ASKPASS), when prefetch is incomplete, the next connect attempt uses one-shot `StrictHostKeyChecking=accept-new` to avoid repeated host-key failure loops
 
 ### Customizable Hotkeys
 
