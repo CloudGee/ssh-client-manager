@@ -180,9 +180,23 @@ class TerminalWidget(Gtk.Box):
         if working_dir is None:
             working_dir = str(GLib.get_home_dir())
 
-        # Build environment
+        # Build environment and enforce a UTF-8 locale for shell rendering.
+        env_map: dict[str, str] = {}
         if env is None:
-            env = [f"{k}={v}" for k, v in os.environ.items()]
+            env_map.update({k: str(v) for k, v in os.environ.items()})
+        else:
+            for item in env:
+                if not isinstance(item, str) or "=" not in item:
+                    continue
+                key, value = item.split("=", 1)
+                env_map[key] = value
+
+        lang = env_map.get("LANG", "")
+        if "UTF-8" not in lang.upper() and "UTF8" not in lang.upper():
+            env_map["LANG"] = "en_US.UTF-8"
+        if not env_map.get("LC_CTYPE"):
+            env_map["LC_CTYPE"] = env_map.get("LANG", "en_US.UTF-8")
+        env = [f"{k}={v}" for k, v in env_map.items()]
 
         # Resolve argv[0] to absolute path (GLib.SpawnFlags.DEFAULT
         # requires an absolute path; this avoids needing SEARCH_PATH)

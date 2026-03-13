@@ -143,6 +143,16 @@ class SSHClientApp(Adw.Application):
 
         self.window.present()
 
+    def do_shutdown(self):
+        """Application shutdown: persist state for quit paths bypassing close-request."""
+        if self.window:
+            try:
+                self.window._persist_window_state()
+                self.window._cleanup_before_exit()
+            except Exception:
+                pass
+        Adw.Application.do_shutdown(self)
+
     def _load_css(self):
         """Load application CSS."""
         from gi.repository import Gdk

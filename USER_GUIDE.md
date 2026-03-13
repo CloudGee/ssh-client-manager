@@ -61,10 +61,13 @@
 - Middle-click to paste selection
 - **Careful Pasting:** multi-line paste now warns before execution to avoid accidental command runs
 - **Bracketed Paste:** pasted text is wrapped in bracketed-paste mode to reduce shell auto-execution surprises
+- **Tab completion stability:** single and double `Tab` (including `Shift+Tab`) are passed directly to the shell when terminal input is focused, so completion/menu behavior matches a native terminal
+- **Unicode prompt rendering stability:** terminal sessions force a UTF-8 locale fallback (`LANG/LC_CTYPE`) to avoid redraw offsets with icon/emoji prompts during completion
 
 ### Persistent Tabs
 
 - Open tabs are persisted on exit and restored on next launch
+- State persistence now also applies when quitting from macOS Dock (right-click app icon → Quit)
 - **Reopen Closed Tab** is available in the app menu to recover accidentally closed tabs
 - Restored tabs recover connection/local tab context (terminal process state itself depends on the shell/remote side)
 

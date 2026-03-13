@@ -92,6 +92,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._recently_closed_tabs: list[dict] = []
         self._hotkey_pending_first: str | None = None
         self._hotkey_pending_timeout_id = 0
+        self._shutdown_cleanup_done = False
 
         self._setup_actions()
         self._build_ui()
@@ -2102,6 +2103,19 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_key_pressed(self, controller, keyval, keycode, state):
         """Handle global keyboard shortcuts, including configurable chords."""
+        # Never consume plain Tab/Shift+Tab at window level; let the focused
+        # widget (especially VTE) handle completion/navigation directly.
+        if keyval in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab) and not (
+            state
+            & (
+                Gdk.ModifierType.CONTROL_MASK
+                | Gdk.ModifierType.META_MASK
+                | Gdk.ModifierType.ALT_MASK
+                | Gdk.ModifierType.SUPER_MASK
+            )
+        ):
+            return False
+
         if self._handle_custom_hotkeys(keyval, state):
             return True
 
@@ -3614,6 +3628,31 @@ class MainWindow(Adw.ApplicationWindow):
                 tabs.append({"type": "local", "title": title})
         self.config.set("last_open_tabs", tabs)
 
+    def _persist_window_state(self):
+        """Persist tabs and window geometry before app shutdown."""
+        self._save_open_tabs_state()
+
+        self.config.batch_update(
+            {
+                "sidebar_width": self.paned.get_position(),
+            }
+        )
+        alloc = self.get_allocation()
+        updates = {}
+        if alloc.width > 0:
+            updates["window_width"] = alloc.width
+        if alloc.height > 0:
+            updates["window_height"] = alloc.height
+        if updates:
+            self.config.batch_update(updates)
+
+    def _cleanup_before_exit(self):
+        """Run one-time shutdown cleanup for terminal/SSH resources."""
+        if self._shutdown_cleanup_done:
+            return
+        self.ssh_handler.cleanup_all()
+        self._shutdown_cleanup_done = True
+
     def _restore_open_tabs_state(self) -> bool:
         """Restore tabs from previous run if enabled."""
         if not self.config.get("restore_tabs_on_startup", True):
@@ -3805,21 +3844,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_close_request(self, window):
         """Handle window close request."""
-        self._save_open_tabs_state()
-        # Save window state
-        self.config.batch_update(
-            {
-                "sidebar_width": self.paned.get_position(),
-            }
-        )
-        alloc = self.get_allocation()
-        updates = {}
-        if alloc.width > 0:
-            updates["window_width"] = alloc.width
-        if alloc.height > 0:
-            updates["window_height"] = alloc.height
-        if updates:
-            self.config.batch_update(updates)
+        self._persist_window_state()
 
         # Check if any terminals are still running
         if self.config.get("confirm_close_window", True):
@@ -3839,7 +3864,7 @@ class MainWindow(Adw.ApplicationWindow):
 
                 def on_response(d, response):
                     if response == "quit":
-                        self.ssh_handler.cleanup_all()
+                        self._cleanup_before_exit()
                         self.destroy()
 
                 dialog.connect("response", on_response)
@@ -3847,6 +3872,6 @@ class MainWindow(Adw.ApplicationWindow):
                 return True  # Block close; dialog handles it
 
         # Clean up SSH handler
-        self.ssh_handler.cleanup_all()
+        self._cleanup_before_exit()
 
         return False  # Allow close
