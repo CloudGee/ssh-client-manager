@@ -47,6 +47,8 @@ class TabLabel(Gtk.Box):
     def __init__(self, title: str = "Terminal", show_close: bool = True):
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         self.set_halign(Gtk.Align.CENTER)
+        self._base_title = title
+        self._attention = False
 
         # Title label
         self.label = Gtk.Label(label=title)
@@ -75,11 +77,25 @@ class TabLabel(Gtk.Box):
 
     def set_title(self, title: str):
         """Update the tab title."""
-        self.label.set_text(title)
+        self._base_title = title
+        prefix = "● " if self._attention else ""
+        self.label.set_text(prefix + title)
 
     def get_title(self) -> str:
         """Get the current tab title."""
-        return self.label.get_text()
+        return self._base_title
+
+    def mark_attention(self):
+        """Show an unread activity marker on this tab."""
+        self._attention = True
+        self.label.set_text("● " + self._base_title)
+        self.label.add_css_class("warning")
+
+    def clear_attention(self):
+        """Clear activity marker from this tab."""
+        self._attention = False
+        self.label.set_text(self._base_title)
+        self.label.remove_css_class("warning")
 
     def mark_disconnected(self):
         """Visual indicator that the terminal connection ended."""
@@ -160,6 +176,7 @@ class TerminalPanel(Gtk.Box):
         "clone-requested": (GObject.SignalFlags.RUN_LAST, None, (object, object)),
         "new-terminal-requested": (GObject.SignalFlags.RUN_LAST, None, ()),
         "child-exited": (GObject.SignalFlags.RUN_LAST, None, (object, object)),
+        "terminal-attention": (GObject.SignalFlags.RUN_LAST, None, (object, str)),
     }
 
     def __init__(self, config: Config):
@@ -303,6 +320,7 @@ class TerminalPanel(Gtk.Box):
         # Connect terminal signals
         terminal.connect("title-changed", self._on_terminal_title_changed)
         terminal.connect("child-exited", self._on_terminal_child_exited)
+        terminal.connect("attention", self._on_terminal_attention)
 
         # Focus tracking — look up notebook from _terminals at call time
         focus_ctrl = Gtk.EventControllerFocus()
@@ -874,6 +892,9 @@ class TerminalPanel(Gtk.Box):
     def _on_switch_page(self, notebook, child, page_num):
         """Handle switching to a different tab."""
         if isinstance(child, TerminalWidget):
+            info = self._terminals.get(child)
+            if info and info[1]:
+                info[1].clear_attention()
             self.focused_terminal = child
             self.focused_notebook = notebook
             self.emit("active-terminal-changed", child)
@@ -885,7 +906,19 @@ class TerminalPanel(Gtk.Box):
         info = self._terminals.get(terminal)
         if info:
             self.focused_notebook = info[2]
+            if info[1]:
+                info[1].clear_attention()
         self.emit("active-terminal-changed", terminal)
+
+    def _on_terminal_attention(self, terminal, title: str):
+        """Mark a tab when background activity/notification happens."""
+        info = self._terminals.get(terminal)
+        if not info:
+            return
+        _, tab_label, _ = info
+        if terminal is not self.focused_terminal:
+            tab_label.mark_attention()
+        self.emit("terminal-attention", terminal, title)
 
     def _on_terminal_title_changed(self, terminal, title):
         """Update tab label when terminal title changes."""

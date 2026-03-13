@@ -64,7 +64,14 @@ DEFAULTS = {
     # Behavior
     "confirm_close_tab": True,
     "confirm_close_window": True,
+    "confirm_delete_recording": True,
+    "confirm_delete_snippet": True,
     "show_tab_close_button": True,
+    "careful_pasting_enabled": True,
+    "bracketed_paste_enabled": True,
+    "persist_open_tabs": True,
+    "restore_tabs_on_startup": True,
+    "custom_hotkeys": {},
     "word_separators": "-A-Za-z0-9,./?%&#:_=+@~",
     # Terminal logging
     "terminal_logging_enabled": False,

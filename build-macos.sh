@@ -39,7 +39,7 @@ if [ ! -f "ssh-client-manager.spec" ]; then
     error "ssh-client-manager.spec not found.\n   Please run this script from the project root directory."
 fi
 
-rm -rf dist/*
+rm -rf dist/* build/*
 
 # ──────────────────────────────────────────────
 # Step 1: Check for Homebrew
@@ -74,6 +74,19 @@ if [ "$ARCH" = "arm64" ]; then
     info "🍎 Apple Silicon (ARM64) — Homebrew at: $HOMEBREW_PREFIX"
 else
     info "💻 Intel Mac (x86_64) — Homebrew at: $HOMEBREW_PREFIX"
+fi
+
+# Ensure Homebrew GI typelibs/libraries are discoverable in both validation
+# checks and PyInstaller build subprocesses.
+export GI_TYPELIB_PATH="$HOMEBREW_PREFIX/lib/girepository-1.0${GI_TYPELIB_PATH:+:$GI_TYPELIB_PATH}"
+export DYLD_FALLBACK_LIBRARY_PATH="$HOMEBREW_PREFIX/lib${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
+export XDG_DATA_DIRS="$HOMEBREW_PREFIX/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+
+# Ensure Python can discover Homebrew-provided gi package when running inside
+# a virtual environment.
+BREW_PY_SITE="$HOMEBREW_PREFIX/lib/python3.13/site-packages"
+if [ -d "$BREW_PY_SITE" ]; then
+    export PYTHONPATH="$BREW_PY_SITE${PYTHONPATH:+:$PYTHONPATH}"
 fi
 echo ""
 
@@ -200,6 +213,22 @@ if [ ! -d "$VENV_DIR" ]; then
 else
     info "Using existing virtual environment at $VENV_DIR"
     source "$VENV_DIR/bin/activate"
+
+    # Existing environments created without --system-site-packages won't see
+    # Homebrew's gi bindings, which breaks GTK import checks in Step 5.
+    if ! python -c "import gi" >/dev/null 2>&1; then
+        warn "Existing venv cannot import gi; recreating with --system-site-packages"
+        deactivate >/dev/null 2>&1 || true
+        rm -rf "$VENV_DIR"
+        "$PYTHON_PATH" -m venv --system-site-packages "$VENV_DIR"
+        source "$VENV_DIR/bin/activate"
+        info "Upgrading pip..."
+        pip install --upgrade pip > /dev/null 2>&1
+        info "Installing Python dependencies..."
+        pip install PyInstaller
+        pip install -r requirements.txt
+        success "Recreated virtual environment with system site packages"
+    fi
 fi
 
 echo ""

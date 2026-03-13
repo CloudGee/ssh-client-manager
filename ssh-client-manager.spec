@@ -91,6 +91,7 @@ datas += [
     (os.path.join(hb_share, "gtk-4.0"),              "Resources/share/gtk-4.0"),
     # Application source package
     ("src", "src"),
+    ("USER_GUIDE.md", "."),
 ]
 
 # ── libadwaita share data (standard path or Cellar fallback) ────────────────

@@ -6,11 +6,13 @@ lifecycle management.
 """
 
 import gi
+from html.parser import HTMLParser
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Vte", "3.91")
+gi.require_version("Adw", "1")
 
-from gi.repository import Gtk, Vte, GLib, Gdk, Pango, GObject
+from gi.repository import Gtk, Vte, GLib, Gdk, Pango, GObject, Adw
 from typing import Optional
 
 from .connection import Connection
@@ -30,6 +32,7 @@ class TerminalWidget(Gtk.Box):
     __gsignals__ = {
         "title-changed": (GObject.SignalFlags.RUN_LAST, None, (str,)),
         "child-exited": (GObject.SignalFlags.RUN_LAST, None, (int,)),
+        "attention": (GObject.SignalFlags.RUN_LAST, None, (str,)),
     }
 
     def __init__(self, config: Config, connection: Optional[Connection] = None):
@@ -66,6 +69,7 @@ class TerminalWidget(Gtk.Box):
         # Connect signals
         self.vte.connect("child-exited", self._on_child_exited)
         self.vte.connect("window-title-changed", self._on_title_changed)
+        self.vte.connect("bell", self._on_bell)
 
         # Focus handling
         self.vte.set_focusable(True)
@@ -239,7 +243,72 @@ class TerminalWidget(Gtk.Box):
 
     def paste_clipboard(self):
         """Paste from clipboard."""
-        self.vte.paste_clipboard()
+        self._paste_from_clipboard_with_guard()
+
+    def _paste_from_clipboard_with_guard(self):
+        """Read clipboard text and optionally warn before multiline paste."""
+
+        def _read_done(clip, result):
+            try:
+                text = clip.read_text_finish(result) or ""
+            except Exception:
+                text = ""
+            if not text:
+                return
+            self._maybe_confirm_multiline_paste(
+                text, lambda: self._feed_pasted_text(text)
+            )
+
+        self.get_clipboard().read_text_async(None, _read_done)
+
+    def _feed_pasted_text(self, text: str):
+        """Feed pasted text to VTE, optionally wrapped in bracketed paste."""
+        if self.config.get("bracketed_paste_enabled", True):
+            payload = "\x1b[200~" + text + "\x1b[201~"
+            self.feed_child(payload)
+        else:
+            self.feed_child(text)
+
+    def _maybe_confirm_multiline_paste(self, text: str, on_confirm):
+        """Show warning dialog for multiline paste when enabled."""
+        if not self.config.get("careful_pasting_enabled", True):
+            on_confirm()
+            return
+
+        line_count = len(text.rstrip("\n").splitlines())
+        if line_count <= 1:
+            on_confirm()
+            return
+
+        root = self.get_root()
+        if root is None:
+            on_confirm()
+            return
+
+        preview_lines = text.strip().splitlines()
+        preview = "\n".join(preview_lines[:4])
+        if len(preview_lines) > 4:
+            preview += "\n..."
+
+        dialog = Adw.MessageDialog(
+            transient_for=root,
+            heading="Paste multiple lines?",
+            body=(
+                f"You are about to paste {line_count} lines into the terminal.\n"
+                "This may execute multiple commands.\n\n"
+                f"Preview:\n{preview}"
+            ),
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("paste", "Paste")
+        dialog.set_response_appearance("paste", Adw.ResponseAppearance.SUGGESTED)
+
+        def _on_response(_d, response):
+            if response == "paste":
+                on_confirm()
+
+        dialog.connect("response", _on_response)
+        dialog.present()
 
     def select_all(self):
         """Select all terminal content."""
@@ -366,6 +435,11 @@ class TerminalWidget(Gtk.Box):
         title = self.get_title()
         self.emit("title-changed", title)
 
+    def _on_bell(self, terminal):
+        """Raise an attention signal for tabs when terminal bell rings."""
+        title = self.get_title() or "Terminal"
+        self.emit("attention", title)
+
     # --- Logging ---
 
     def start_logging(self, log_path: str):
@@ -485,25 +559,19 @@ class TerminalWidget(Gtk.Box):
             first_visible = int(vadj.get_value())
             last_visible = first_visible + rows - 1
 
-            # Capture only the visible area using get_text_range_format
+            # Capture HTML for the visible area so ANSI colours/styles can
+            # be preserved in the recording output.
             result = vte.get_text_range_format(
-                Vte.Format.TEXT, first_visible, 0, last_visible, cols - 1
+                Vte.Format.HTML, first_visible, 0, last_visible, cols - 1
             )
-            text = result[0] if isinstance(result, tuple) else result
-            if text is None:
+            html = result[0] if isinstance(result, tuple) else result
+            if html is None:
                 return False
 
-            # Split into individual lines, strip trailing spaces per line
-            lines = text.split("\n")
-            lines = [l.rstrip() for l in lines]
+            lines = self._html_to_ansi_lines(html)
 
             # Remove excess trailing empty lines (keep at most ``rows`` lines)
             while len(lines) > rows:
-                if not lines[-1]:
-                    lines.pop()
-                else:
-                    break
-            while lines and not lines[-1]:
                 lines.pop()
 
             prev = self._rec_prev_lines
@@ -538,6 +606,138 @@ class TerminalWidget(Gtk.Box):
             pass
         return False
 
+    @staticmethod
+    def _parse_color_to_rgb(color: str):
+        """Parse CSS color string into RGB tuple for ANSI true-color output."""
+        rgba = Gdk.RGBA()
+        if not color or not rgba.parse(color):
+            return None
+        return (
+            max(0, min(255, int(round(rgba.red * 255)))),
+            max(0, min(255, int(round(rgba.green * 255)))),
+            max(0, min(255, int(round(rgba.blue * 255)))),
+        )
+
+    @classmethod
+    def _style_to_ansi(cls, style: dict) -> str:
+        """Convert parsed style dict to ANSI escape sequence."""
+        if not style:
+            return "\x1b[0m"
+
+        codes = ["0"]
+        if style.get("bold"):
+            codes.append("1")
+        if style.get("italic"):
+            codes.append("3")
+        if style.get("underline"):
+            codes.append("4")
+
+        fg = cls._parse_color_to_rgb(style.get("fg", ""))
+        if fg:
+            r, g, b = fg
+            codes.append(f"38;2;{r};{g};{b}")
+
+        bg = cls._parse_color_to_rgb(style.get("bg", ""))
+        if bg:
+            r, g, b = bg
+            codes.append(f"48;2;{r};{g};{b}")
+
+        return "\x1b[" + ";".join(codes) + "m"
+
+    @classmethod
+    def _html_to_ansi_lines(cls, html: str) -> list[str]:
+        """Convert VTE HTML export into ANSI-coloured terminal lines."""
+
+        class _HtmlToAnsiParser(HTMLParser):
+            def __init__(self):
+                super().__init__(convert_charrefs=True)
+                self.lines: list[list[tuple[str, dict]]] = [[]]
+                self._style_stack: list[dict] = [dict()]
+
+            def _current(self) -> dict:
+                return self._style_stack[-1]
+
+            def _parse_style_attr(self, style_text: str, current: dict) -> dict:
+                updated = dict(current)
+                for part in style_text.split(";"):
+                    if ":" not in part:
+                        continue
+                    key, value = part.split(":", 1)
+                    key = key.strip().lower()
+                    value = value.strip()
+                    if key == "color":
+                        updated["fg"] = value
+                    elif key == "background-color":
+                        updated["bg"] = value
+                    elif key == "font-weight" and "bold" in value.lower():
+                        updated["bold"] = True
+                    elif key == "font-style" and "italic" in value.lower():
+                        updated["italic"] = True
+                    elif key == "text-decoration" and "underline" in value.lower():
+                        updated["underline"] = True
+                return updated
+
+            def handle_starttag(self, tag, attrs):
+                tag = tag.lower()
+                attr_map = {k.lower(): v for k, v in attrs}
+                current = dict(self._current())
+
+                if tag == "br":
+                    self.lines.append([])
+                    return
+                if tag in ("b", "strong"):
+                    current["bold"] = True
+                elif tag in ("i", "em"):
+                    current["italic"] = True
+                elif tag == "u":
+                    current["underline"] = True
+                elif tag == "font" and attr_map.get("color"):
+                    current["fg"] = attr_map["color"]
+                elif tag == "span" and attr_map.get("style"):
+                    current = self._parse_style_attr(attr_map["style"], current)
+
+                self._style_stack.append(current)
+
+            def handle_endtag(self, tag):
+                tag = tag.lower()
+                if tag == "br":
+                    return
+                if len(self._style_stack) > 1:
+                    self._style_stack.pop()
+
+            def handle_data(self, data):
+                if not data:
+                    return
+                parts = data.replace("\r", "").split("\n")
+                for idx, part in enumerate(parts):
+                    if part:
+                        self.lines[-1].append((part, dict(self._current())))
+                    if idx < len(parts) - 1:
+                        self.lines.append([])
+
+        parser = _HtmlToAnsiParser()
+        parser.feed(html or "")
+
+        out_lines: list[str] = []
+        for segments in parser.lines:
+            if not segments:
+                out_lines.append("")
+                continue
+            line_parts: list[str] = []
+            current_style = None
+            for text, style in segments:
+                if style != current_style:
+                    line_parts.append(cls._style_to_ansi(style))
+                    current_style = style
+                line_parts.append(text)
+            if current_style is not None:
+                line_parts.append("\x1b[0m")
+            out_lines.append("".join(line_parts))
+
+        while out_lines and out_lines[-1] == "":
+            out_lines.pop()
+        return out_lines
+
     @property
     def is_recording(self) -> bool:
         """Whether terminal session is being recorded."""
@@ -550,7 +750,7 @@ class TerminalWidget(Gtk.Box):
         if self.vte.get_has_selection():
             # Copy selection to clipboard, then paste it
             self.copy_clipboard()
-            GLib.timeout_add(50, self.paste_clipboard)
+            GLib.timeout_add(50, lambda: (self.paste_clipboard(), False)[1])
         else:
             self.paste_clipboard()
         gesture.set_state(Gtk.EventSequenceState.CLAIMED)
@@ -642,12 +842,17 @@ class TerminalWidget(Gtk.Box):
         then renders with Cairo/PangoCairo.  Falls back to WidgetPaintable
         or plain-text rendering when needed.
         """
-        self._render_vte_screenshot()
+        selected_only = bool(self.vte.get_has_selection())
+        self._render_vte_screenshot(selected_only=selected_only)
 
-    def _render_vte_screenshot(self):
+    def _render_vte_screenshot(self, selected_only: bool = False):
         """Render the VTE as a coloured PNG screenshot."""
         # Method 1: VTE HTML export (reliable colour capture)
-        if self._try_html_screenshot():
+        if self._try_html_screenshot(selected_only=selected_only):
+            return
+
+        # If a selected-area capture fails, gracefully fall back to full view.
+        if selected_only and self._try_html_screenshot(selected_only=False):
             return
 
         # Method 2: WidgetPaintable (captures GL-rendered widgets)
@@ -657,7 +862,7 @@ class TerminalWidget(Gtk.Box):
         # Method 3: Plain text fallback (no per-character colours)
         self._render_text_screenshot_with_colors()
 
-    def _try_html_screenshot(self) -> bool:
+    def _try_html_screenshot(self, selected_only: bool = False) -> bool:
         """Render screenshot by parsing VTE's HTML export for colours."""
         try:
             import io
@@ -672,7 +877,15 @@ class TerminalWidget(Gtk.Box):
             return False
 
         try:
-            html = self.vte.get_text_format(Vte.Format.HTML)
+            if selected_only:
+                if hasattr(self.vte, "get_text_selected"):
+                    html = self.vte.get_text_selected(Vte.Format.HTML)
+                elif hasattr(self.vte, "get_text_selected_full"):
+                    html = self.vte.get_text_selected_full(Vte.Format.HTML)
+                else:
+                    html = ""
+            else:
+                html = self.vte.get_text_format(Vte.Format.HTML)
             if isinstance(html, tuple):
                 html = html[0]
             if not html or "<font" not in html and "<span" not in html:
@@ -1065,7 +1278,6 @@ class TerminalWidget(Gtk.Box):
         menu.append_section(None, section1)
 
         section2 = Gio.Menu()
-        section2.append("Reset Terminal", "term.reset")
         section2.append("Clear Scrollback", "term.clear")
         menu.append_section(None, section2)
 
@@ -1080,7 +1292,7 @@ class TerminalWidget(Gtk.Box):
         menu.append_section(None, section4)
 
         section5 = Gio.Menu()
-        section5.append("Copy Screenshot of Selection", "term.screenshot")
+        section5.append("Copy Screenshot", "term.screenshot")
         menu.append_section(None, section5)
 
         return menu

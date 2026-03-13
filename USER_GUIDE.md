@@ -59,6 +59,35 @@
 - **macOS:** `Cmd+C` / `Cmd+V`
 - **Linux:** `Ctrl+Shift+C` / `Ctrl+Shift+V`
 - Middle-click to paste selection
+- **Careful Pasting:** multi-line paste now warns before execution to avoid accidental command runs
+- **Bracketed Paste:** pasted text is wrapped in bracketed-paste mode to reduce shell auto-execution surprises
+
+### Persistent Tabs
+
+- Open tabs are persisted on exit and restored on next launch
+- **Reopen Closed Tab** is available in the app menu to recover accidentally closed tabs
+- Restored tabs recover connection/local tab context (terminal process state itself depends on the shell/remote side)
+
+### Smart Tabs
+
+- Tabs can mark background activity (attention marker `●`)
+- When the app is not focused, background tab activity can trigger desktop notifications
+- Usage:
+  1. Keep one tab in background (switch to another tab)
+  2. When background tab has bell/activity, it shows `●`
+  3. Switch back to that tab to clear the marker
+
+### Host Key Verification
+
+- On first SSH/SFTP connection to a host, the app prompts whether to trust and add host key to `~/.ssh/known_hosts`
+- If host key verification fails (for example key changed), the app prompts to refresh the host key and reconnect
+- After accepting, connection is retried automatically
+
+### Customizable Hotkeys
+
+- Hotkeys support both single-stroke and **multi-chord** sequences
+- Configure via `~/.config/ssh-client-manager/config.json` in `custom_hotkeys`
+- Example multi-chord: `"snippets-alt": "Ctrl+K Ctrl+S"`
 
 ---
 
@@ -135,11 +164,17 @@ When sending or copying, a dialog prompts to fill in each variable before the co
 - Click the **Record button** (circle icon) in the header bar to start/stop recording the current terminal
 - Also available via **right-click a terminal** → **Start / Stop Recording**
 - The button turns red while recording; the tab title shows **[REC]**
-- Recordings are saved in **asciicast v2** format (`.cast` files)
+- Recordings are saved in **asciicast v2** format (`.cast` files) with ANSI colour/style preserved
 - The tab title shows **[REC]** while recording; the status bar shows the output file path
 - Default save directory: `~/Documents/SSHClientManager-Recordings` (configurable in Preferences → Session Recording)
 - The directory is created automatically if it doesn't exist
 - View and replay past recordings via **Menu → Session Recordings**
+- In **Session Recordings**, existing session records can be **renamed**
+- Recording list supports **search + filters** by host/date/size
+- In **Session Recordings**, you can **Export GIF** for easy sharing
+- GIF export provides an options panel: **quality / FPS / theme / speed**
+- GIF export uses `agg` (asciinema-agg). If missing, the app prompts for consent and can install via Homebrew
+- MP4 export is supported and uses `ffmpeg` (also installed via consented Homebrew flow if missing)
 - Built-in player with **Play/Pause**, **Restart**, and **speed control** (0.5x–8x)
 - Open external `.cast` files via the **Open** button in the recordings dialog
 
@@ -195,7 +230,10 @@ Works with OpenAI, Claude, Ollama, LM Studio, Groq, and any OpenAI-compatible en
 
 ## Terminal Screenshot
 
-Right-click a terminal → **Copy Screenshot of Selection**, or use the context menu.
+Right-click a terminal → **Copy Screenshot**, or use the context menu.
+
+- If terminal text is selected, it captures the **selected area only**
+- If nothing is selected, it captures **all currently visible terminal content**
 
 - Screenshots **preserve terminal ANSI colours** by parsing VTE HTML export for per-character colour information, then rendering with Cairo/PangoCairo
 - Falls back to WidgetPaintable capture, then plain-text rendering with configured foreground/background colours

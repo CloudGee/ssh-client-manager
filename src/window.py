@@ -6,6 +6,10 @@ toolbar, and menu into the main GTK4/libadwaita window.
 """
 
 import os
+import shlex
+import subprocess
+import sys
+from pathlib import Path
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -83,6 +87,9 @@ class MainWindow(Adw.ApplicationWindow):
         # Auto-reconnect attempt tracking: terminal id → attempt count
         self._reconnect_attempts: dict = {}
         self._reconnect_timers: dict = {}
+        self._recently_closed_tabs: list[dict] = []
+        self._hotkey_pending_first: str | None = None
+        self._hotkey_pending_timeout_id = 0
 
         self._setup_actions()
         self._build_ui()
@@ -108,6 +115,7 @@ class MainWindow(Adw.ApplicationWindow):
             "unsplit": self._on_unsplit,
             "cluster-toggle": self._on_cluster_toggle,
             "close-tab": self._on_close_tab,
+            "reopen-closed-tab": self._on_reopen_closed_tab,
             "next-tab": self._on_next_tab,
             "prev-tab": self._on_prev_tab,
             "toggle-sidebar": self._on_toggle_sidebar,
@@ -162,7 +170,6 @@ class MainWindow(Adw.ApplicationWindow):
             "copy": lambda *_: self._active_terminal_action("copy_clipboard"),
             "paste": lambda *_: self._active_terminal_action("paste_clipboard"),
             "select-all": lambda *_: self._active_terminal_action("select_all"),
-            "reset": lambda *_: self._active_terminal_action("reset_terminal"),
             "clear": lambda *_: self._active_terminal_action("reset_terminal", True),
             "toggle-log": self._on_toggle_log,
             "toggle-record": self._on_toggle_record,
@@ -335,6 +342,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         section1 = Gio.Menu()
         section1.append("New Connection", "win.new-connection")
+        section1.append("Reopen Closed Tab", "win.reopen-closed-tab")
         menu.append_section(None, section1)
 
         section2 = Gio.Menu()
@@ -382,6 +390,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.terminal_panel.connect(
             "terminal-title-changed", self._on_terminal_title_changed
         )
+        self.terminal_panel.connect("terminal-attention", self._on_terminal_attention)
         self.terminal_panel.connect("reconnect-requested", self._on_reconnect_requested)
         self.terminal_panel.connect("clone-requested", self._on_clone_requested)
         self.terminal_panel.connect(
@@ -465,87 +474,276 @@ class MainWindow(Adw.ApplicationWindow):
         else:
             self._open_ssh_connection(conn)
 
-    def _open_ssh_connection(self, conn):
-        """Open an SSH connection in a terminal tab."""
-        terminal = TerminalWidget(self.config, conn)
-        ssh_cmd = self.ssh_handler.build_ssh_command(conn)
-        env, session_id = self.ssh_handler.build_environment(conn)
-        terminal._askpass_session_id = session_id
-        title = conn.name or conn.display_name()
-        self.terminal_panel.add_tab(terminal, conn, title)
-        terminal.spawn_command(ssh_cmd, env)
+    def _extract_host_port_from_connection(
+        self, conn, default_port: int = 22
+    ) -> tuple[str, int]:
+        """Extract target host/port from structured fields or command text."""
+        host = (getattr(conn, "host", "") or "").strip()
+        port = int(getattr(conn, "port", 0) or default_port)
 
-        commands = self.ssh_handler.get_post_login_commands(conn)
-        if commands:
-            self._schedule_post_login_commands(terminal, commands)
+        if not host:
+            cmd = (getattr(conn, "command", "") or "").strip()
+            if cmd:
+                try:
+                    parts = shlex.split(" ".join(cmd.splitlines()))
+                except ValueError:
+                    parts = cmd.split()
 
-        if session_id:
-            GLib.timeout_add(
-                15000,
-                lambda sid=session_id: self.ssh_handler.cleanup_askpass(sid) or False,
+                i = 0
+                positional = []
+                option_with_value = {
+                    "-p",
+                    "-P",
+                    "-i",
+                    "-o",
+                    "-F",
+                    "-J",
+                    "-L",
+                    "-R",
+                    "-D",
+                    "-W",
+                    "-w",
+                    "-S",
+                    "-b",
+                    "-c",
+                    "-m",
+                }
+                while i < len(parts):
+                    part = parts[i]
+                    if part in ("-p", "-P") and i + 1 < len(parts):
+                        try:
+                            port = int(parts[i + 1])
+                        except ValueError:
+                            pass
+                        i += 2
+                        continue
+                    if part in option_with_value and i + 1 < len(parts):
+                        i += 2
+                        continue
+                    if part.startswith("-"):
+                        i += 1
+                        continue
+                    if part not in ("ssh", "sftp"):
+                        positional.append(part)
+                    i += 1
+
+                if positional:
+                    dest = positional[-1]
+                    if "@" in dest:
+                        _, dest = dest.split("@", 1)
+                    host, parsed_port = self._parse_host_port(dest, port)
+                    port = parsed_port
+
+        host = host.strip().strip("[]")
+        return host, port
+
+    @staticmethod
+    def _known_hosts_lookup_token(host: str, port: int) -> str:
+        return host if port == 22 else f"[{host}]:{port}"
+
+    def _ensure_host_key_acceptance(
+        self, conn, on_ready, *, replace_existing: bool = False
+    ):
+        """Ensure host key exists in known_hosts before opening SSH/SFTP connection."""
+        host, port = self._extract_host_port_from_connection(conn, 22)
+        if not host:
+            on_ready()
+            return
+
+        ssh_dir = Path.home() / ".ssh"
+        known_hosts = ssh_dir / "known_hosts"
+        lookup = self._known_hosts_lookup_token(host, port)
+
+        if not replace_existing:
+            lookup_cmd = ["ssh-keygen", "-F", lookup, "-f", str(known_hosts)]
+            lookup_result = subprocess.run(lookup_cmd, capture_output=True, text=True)
+            if lookup_result.returncode == 0 and lookup_result.stdout.strip():
+                on_ready()
+                return
+
+        heading = "Host Key Verification"
+        if replace_existing:
+            body = (
+                f"Detected host key verification failure for {lookup}.\n\n"
+                "The server key may have changed.\n"
+                "Do you want to trust the current key and reconnect?"
+            )
+        else:
+            body = (
+                f"First connection to {lookup}.\n\n"
+                "Accept this host key and add it to known_hosts?"
             )
 
-        # Auto-start logging if enabled
-        if self.config.get("terminal_logging_enabled", False):
-            log_dir = self.config.get("terminal_log_directory", "")
-            if log_dir:
-                import datetime
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading=heading,
+            body=body,
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("accept", "Accept and Connect")
+        dialog.set_response_appearance("accept", Adw.ResponseAppearance.SUGGESTED)
 
-                os.makedirs(log_dir, exist_ok=True)
-                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                safe_name = conn.name.replace("/", "_").replace(" ", "_")
-                log_path = os.path.join(log_dir, f"{safe_name}_{ts}.log")
-                terminal.start_logging(log_path)
+        def _on_response(_d, response):
+            if response != "accept":
+                return
 
-        # Mark connected in sidebar
-        self._connected_ids.add(conn.id)
-        self.sidebar.mark_connected(conn.id)
-        self._set_status("Connected: {}".format(conn.name))
+            try:
+                ssh_dir.mkdir(mode=0o700, exist_ok=True)
+                known_hosts.touch(mode=0o600, exist_ok=True)
+
+                if replace_existing:
+                    subprocess.run(
+                        ["ssh-keygen", "-R", host, "-f", str(known_hosts)],
+                        capture_output=True,
+                        text=True,
+                    )
+                    subprocess.run(
+                        ["ssh-keygen", "-R", lookup, "-f", str(known_hosts)],
+                        capture_output=True,
+                        text=True,
+                    )
+
+                scan = subprocess.run(
+                    ["ssh-keyscan", "-T", "5", "-p", str(port), host],
+                    capture_output=True,
+                    text=True,
+                )
+                key_text = (scan.stdout or "").strip()
+                if scan.returncode != 0 or not key_text:
+                    err = (
+                        scan.stderr or scan.stdout or "Failed to fetch host key"
+                    ).strip()
+                    self._set_status(f"Host key fetch failed: {err}")
+                    return
+
+                with open(known_hosts, "a", encoding="utf-8") as f:
+                    if not key_text.endswith("\n"):
+                        key_text += "\n"
+                    f.write(key_text)
+
+                self._set_status(f"Host key accepted: {lookup}")
+                on_ready()
+            except OSError as exc:
+                self._set_status(f"Failed to update known_hosts: {exc}")
+
+        dialog.connect("response", _on_response)
+        dialog.present()
+
+    def _maybe_handle_host_key_failure(self, terminal: TerminalWidget, conn) -> bool:
+        """Detect host-key verification failures and offer trust+reconnect."""
+        if not conn:
+            return False
+        text = (terminal.get_text() or "").lower()
+        patterns = (
+            "host key verification failed",
+            "remote host identification has changed",
+        )
+        if not any(p in text for p in patterns):
+            return False
+
+        self._ensure_host_key_acceptance(
+            conn,
+            lambda: self.open_connection(conn.id),
+            replace_existing=True,
+        )
+        return True
+
+    def _open_ssh_connection(self, conn):
+        """Open an SSH connection in a terminal tab."""
+
+        def _spawn():
+            terminal = TerminalWidget(self.config, conn)
+            ssh_cmd = self.ssh_handler.build_ssh_command(conn)
+            env, session_id = self.ssh_handler.build_environment(conn)
+            terminal._askpass_session_id = session_id
+            title = conn.name or conn.display_name()
+            self.terminal_panel.add_tab(terminal, conn, title)
+            terminal.spawn_command(ssh_cmd, env)
+
+            commands = self.ssh_handler.get_post_login_commands(conn)
+            if commands:
+                self._schedule_post_login_commands(terminal, commands)
+
+            if session_id:
+                GLib.timeout_add(
+                    15000,
+                    lambda sid=session_id: self.ssh_handler.cleanup_askpass(sid)
+                    or False,
+                )
+
+            # Auto-start logging if enabled
+            if self.config.get("terminal_logging_enabled", False):
+                log_dir = self.config.get("terminal_log_directory", "")
+                if log_dir:
+                    import datetime
+
+                    os.makedirs(log_dir, exist_ok=True)
+                    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    safe_name = conn.name.replace("/", "_").replace(" ", "_")
+                    log_path = os.path.join(log_dir, f"{safe_name}_{ts}.log")
+                    terminal.start_logging(log_path)
+
+            # Mark connected in sidebar
+            self._connected_ids.add(conn.id)
+            self.sidebar.mark_connected(conn.id)
+            self._set_status("Connected: {}".format(conn.name))
+
+        self._ensure_host_key_acceptance(conn, _spawn)
 
     def _open_sftp_connection(self, conn):
         """Open an SFTP session in a terminal tab and show file browser."""
-        terminal = TerminalWidget(self.config, conn)
-        sftp_cmd = self.ssh_handler.build_sftp_command(conn)
-        env, session_id = self.ssh_handler.build_environment(conn)
-        terminal._askpass_session_id = session_id
-        title = f"SFTP: {conn.name or conn.display_name()}"
-        self.terminal_panel.add_tab(terminal, conn, title)
-        terminal.spawn_command(sftp_cmd, env)
 
-        if session_id:
-            GLib.timeout_add(
-                15000,
-                lambda sid=session_id: self.ssh_handler.cleanup_askpass(sid) or False,
-            )
-        self._set_status(f"SFTP: {conn.name}")
+        def _spawn():
+            terminal = TerminalWidget(self.config, conn)
+            sftp_cmd = self.ssh_handler.build_sftp_command(conn)
+            env, session_id = self.ssh_handler.build_environment(conn)
+            terminal._askpass_session_id = session_id
+            title = f"SFTP: {conn.name or conn.display_name()}"
+            self.terminal_panel.add_tab(terminal, conn, title)
+            terminal.spawn_command(sftp_cmd, env)
 
-        # Track as SFTP terminal and show browser
-        self._sftp_terminals[id(terminal)] = conn
-        self.sidebar.show_sftp_browser(conn, self.credential_store)
+            if session_id:
+                GLib.timeout_add(
+                    15000,
+                    lambda sid=session_id: self.ssh_handler.cleanup_askpass(sid)
+                    or False,
+                )
+            self._set_status(f"SFTP: {conn.name}")
+
+            # Track as SFTP terminal and show browser
+            self._sftp_terminals[id(terminal)] = conn
+            self.sidebar.show_sftp_browser(conn, self.credential_store)
+
+        self._ensure_host_key_acceptance(conn, _spawn)
 
     def _open_sftp_for_ssh(self, connection_id: str):
         """Open an SFTP session derived from an existing SSH connection."""
         conn = self.connection_manager.get_connection(connection_id)
         if not conn:
             return
-        terminal = TerminalWidget(self.config, conn)
-        sftp_cmd = self.ssh_handler.build_sftp_from_ssh(conn)
-        env, session_id = self.ssh_handler.build_environment(conn)
-        terminal._askpass_session_id = session_id
-        title = f"SFTP: {conn.name or conn.display_name()}"
-        self.terminal_panel.add_tab(terminal, conn, title)
-        terminal.spawn_command(sftp_cmd, env)
 
-        if session_id:
-            GLib.timeout_add(
-                15000,
-                lambda sid=session_id: self.ssh_handler.cleanup_askpass(sid) or False,
-            )
-        self._set_status(f"SFTP: {conn.name}")
+        def _spawn():
+            terminal = TerminalWidget(self.config, conn)
+            sftp_cmd = self.ssh_handler.build_sftp_from_ssh(conn)
+            env, session_id = self.ssh_handler.build_environment(conn)
+            terminal._askpass_session_id = session_id
+            title = f"SFTP: {conn.name or conn.display_name()}"
+            self.terminal_panel.add_tab(terminal, conn, title)
+            terminal.spawn_command(sftp_cmd, env)
 
-        # Track as SFTP terminal and show browser
-        self._sftp_terminals[id(terminal)] = conn
-        self.sidebar.show_sftp_browser(conn, self.credential_store)
+            if session_id:
+                GLib.timeout_add(
+                    15000,
+                    lambda sid=session_id: self.ssh_handler.cleanup_askpass(sid)
+                    or False,
+                )
+            self._set_status(f"SFTP: {conn.name}")
+
+            # Track as SFTP terminal and show browser
+            self._sftp_terminals[id(terminal)] = conn
+            self.sidebar.show_sftp_browser(conn, self.credential_store)
+
+        self._ensure_host_key_acceptance(conn, _spawn)
 
     def _open_rdp_connection(self, conn):
         """Open an RDP connection.
@@ -929,6 +1127,14 @@ class MainWindow(Adw.ApplicationWindow):
         """Switch to next tab."""
         self.terminal_panel.next_tab()
 
+    def _on_reopen_closed_tab(self, *_):
+        """Reopen the most recently closed tab."""
+        if not self._recently_closed_tabs:
+            self._set_status("No recently closed tab")
+            return
+        state = self._recently_closed_tabs.pop()
+        self._restore_tab_from_state(state)
+
     def _on_prev_tab(self, action, param):
         """Switch to previous tab."""
         self.terminal_panel.prev_tab()
@@ -1298,6 +1504,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._update_tab_count()
         if self._cluster_window is not None:
             self._cluster_window.refresh()
+        self._remember_closed_tab(terminal)
         # Clean up SFTP tracking
         self._sftp_terminals.pop(id(terminal), None)
         # Kill the child process (e.g. ssh) if still running
@@ -1333,6 +1540,30 @@ class MainWindow(Adw.ApplicationWindow):
                 tab_title = conn.name if conn else "Local"
                 self._send_notification(f"Terminal closed: {tab_title}")
 
+    def _remember_closed_tab(self, terminal: TerminalWidget):
+        """Remember recently closed tabs so users can quickly restore them."""
+        conn = getattr(terminal, "connection", None)
+        title = self.terminal_panel.get_tab_title(terminal) or (
+            conn.name if conn else "Local"
+        )
+        state = {
+            "type": "connection" if conn else "local",
+            "connection_id": conn.id if conn else "",
+            "title": title,
+        }
+        self._recently_closed_tabs.append(state)
+        # Keep a small restore stack
+        if len(self._recently_closed_tabs) > 20:
+            self._recently_closed_tabs = self._recently_closed_tabs[-20:]
+
+    def _on_terminal_attention(self, _panel, terminal, title: str):
+        """Handle tab activity notifications (bell/progress attention)."""
+        if self.config.get("notify_on_completion", True) and not self.is_active():
+            tab_title = (
+                self.terminal_panel.get_tab_title(terminal) or title or "Terminal"
+            )
+            self._send_notification(f"Terminal activity: {tab_title}")
+
     def _on_child_exited(self, panel, terminal, conn):
         """Handle SSH child process exiting (terminal tab stays open)."""
         if conn:
@@ -1355,6 +1586,9 @@ class MainWindow(Adw.ApplicationWindow):
             if not other_alive:
                 self._connected_ids.discard(conn.id)
                 self.sidebar.mark_disconnected(conn.id)
+
+            if self._maybe_handle_host_key_failure(terminal, conn):
+                return
 
             # Auto-reconnect if enabled for this connection
             if getattr(conn, "auto_reconnect", False):
@@ -1450,30 +1684,38 @@ class MainWindow(Adw.ApplicationWindow):
             vnc_cmd = self.ssh_handler.build_vnc_command(conn)
             terminal.spawn_command(vnc_cmd)
         elif proto == "sftp":
-            sftp_cmd = self.ssh_handler.build_sftp_command(conn)
-            env, session_id = self.ssh_handler.build_environment(conn)
-            terminal._askpass_session_id = session_id
-            terminal.spawn_command(sftp_cmd, env)
-            if session_id:
-                GLib.timeout_add(
-                    15000,
-                    lambda sid=session_id: self.ssh_handler.cleanup_askpass(sid)
-                    or False,
-                )
+
+            def _spawn_sftp():
+                sftp_cmd = self.ssh_handler.build_sftp_command(conn)
+                env, session_id = self.ssh_handler.build_environment(conn)
+                terminal._askpass_session_id = session_id
+                terminal.spawn_command(sftp_cmd, env)
+                if session_id:
+                    GLib.timeout_add(
+                        15000,
+                        lambda sid=session_id: self.ssh_handler.cleanup_askpass(sid)
+                        or False,
+                    )
+
+            self._ensure_host_key_acceptance(conn, _spawn_sftp)
         else:
-            ssh_cmd = self.ssh_handler.build_ssh_command(conn)
-            env, session_id = self.ssh_handler.build_environment(conn)
-            terminal._askpass_session_id = session_id
-            terminal.spawn_command(ssh_cmd, env)
-            commands = self.ssh_handler.get_post_login_commands(conn)
-            if commands:
-                self._schedule_post_login_commands(terminal, commands)
-            if session_id:
-                GLib.timeout_add(
-                    15000,
-                    lambda sid=session_id: self.ssh_handler.cleanup_askpass(sid)
-                    or False,
-                )
+
+            def _spawn_ssh():
+                ssh_cmd = self.ssh_handler.build_ssh_command(conn)
+                env, session_id = self.ssh_handler.build_environment(conn)
+                terminal._askpass_session_id = session_id
+                terminal.spawn_command(ssh_cmd, env)
+                commands = self.ssh_handler.get_post_login_commands(conn)
+                if commands:
+                    self._schedule_post_login_commands(terminal, commands)
+                if session_id:
+                    GLib.timeout_add(
+                        15000,
+                        lambda sid=session_id: self.ssh_handler.cleanup_askpass(sid)
+                        or False,
+                    )
+
+            self._ensure_host_key_acceptance(conn, _spawn_ssh)
         # Clear disconnected visual state on the tab
         self.terminal_panel.mark_tab_active(terminal)
         # Mark connected in sidebar
@@ -1489,97 +1731,156 @@ class MainWindow(Adw.ApplicationWindow):
     # Keyboard Shortcuts
     # =====================================================================
 
-    def _on_key_pressed(self, controller, keyval, keycode, state):
-        """Handle global keyboard shortcuts."""
+    def _default_hotkeys(self) -> dict[str, str]:
+        """Return built-in hotkey defaults; user config can override these."""
         import sys
 
-        ctrl = state & Gdk.ModifierType.CONTROL_MASK
-        shift = state & Gdk.ModifierType.SHIFT_MASK
-        alt = state & Gdk.ModifierType.ALT_MASK
-        meta = state & Gdk.ModifierType.META_MASK
+        cmd = "Cmd" if sys.platform == "darwin" else "Ctrl"
+        return {
+            "new-local": f"{cmd}+T",
+            "close-tab": f"{cmd}+W",
+            "reopen-closed-tab": f"{cmd}+Shift+R",
+            "new-connection": f"{cmd}+N",
+            "search-terminal": f"{cmd}+F",
+            "preferences": f"{cmd}+,",
+            "next-tab": "Ctrl+Tab",
+            "prev-tab": "Ctrl+Shift+Tab",
+            "snippets": f"{cmd}+Shift+S",
+            "split-left": "Ctrl+Shift+Left",
+            "split-right": "Ctrl+Shift+Right",
+            "split-up": "Ctrl+Shift+Up",
+            "split-down": "Ctrl+Shift+Down",
+            "toggle-sidebar": "F9",
+            # Multi-chord example: can be customized in config.json
+            "snippets-alt": "Ctrl+K Ctrl+S",
+        }
 
-        # macOS Command key shortcuts (window-level: Cmd+W/T/Q/F)
-        if sys.platform == "darwin" and meta:
-            if keyval in (Gdk.KEY_w, Gdk.KEY_W):
-                self.terminal_panel.close_current_tab()
-                return True
-            elif keyval in (Gdk.KEY_t, Gdk.KEY_T) and not shift:
-                self.open_local_terminal()
-                return True
-            elif keyval in (Gdk.KEY_q, Gdk.KEY_Q):
-                self.close()
-                return True
-            elif keyval in (Gdk.KEY_f, Gdk.KEY_F):
-                self._on_search_terminal(None, None)
-                return True
-            elif keyval in (Gdk.KEY_n, Gdk.KEY_N):
-                self._on_new_connection(None, None)
-                return True
-            elif keyval == Gdk.KEY_comma:
-                self._on_preferences(None, None)
-                return True
+    def _key_to_token(self, keyval, state) -> str:
+        """Normalize keyboard event to token format like Ctrl+Shift+T."""
+        parts = []
+        if state & Gdk.ModifierType.CONTROL_MASK:
+            parts.append("Ctrl")
+        if state & Gdk.ModifierType.META_MASK:
+            parts.append("Cmd")
+        if state & Gdk.ModifierType.SHIFT_MASK:
+            parts.append("Shift")
+        if state & Gdk.ModifierType.ALT_MASK:
+            parts.append("Alt")
 
-        # macOS Cmd+Shift+S or Ctrl+Shift+S: Command Snippets
-        if sys.platform == "darwin" and meta and shift:
-            if keyval in (Gdk.KEY_s, Gdk.KEY_S):
-                self._on_show_snippets()
-                return True
+        key_map = {
+            Gdk.KEY_Tab: "Tab",
+            Gdk.KEY_Left: "Left",
+            Gdk.KEY_Right: "Right",
+            Gdk.KEY_Up: "Up",
+            Gdk.KEY_Down: "Down",
+            Gdk.KEY_comma: ",",
+            Gdk.KEY_F9: "F9",
+        }
+        if keyval in key_map:
+            key = key_map[keyval]
+        else:
+            key = Gdk.keyval_name(keyval) or ""
+            key = key.upper() if len(key) == 1 else key
 
-        # F9: Toggle sidebar
-        if keyval == Gdk.KEY_F9:
-            self._on_toggle_sidebar(None, None)
+        if not key:
+            return ""
+        return "+".join(parts + [key]) if parts else key
+
+    def _resolve_hotkeys(self) -> dict[str, str]:
+        """Merge built-in defaults with user overrides from config."""
+        hotkeys = dict(self._default_hotkeys())
+        custom = self.config.get("custom_hotkeys", {}) or {}
+        if isinstance(custom, dict):
+            for action, seq in custom.items():
+                if isinstance(seq, str) and seq.strip():
+                    hotkeys[action] = seq.strip()
+        return hotkeys
+
+    def _invoke_hotkey_action(self, action: str) -> bool:
+        """Dispatch logical hotkey action names to handlers."""
+        mapping = {
+            "new-local": lambda: self.open_local_terminal(),
+            "close-tab": lambda: self._on_close_tab(None, None),
+            "reopen-closed-tab": lambda: self._on_reopen_closed_tab(),
+            "new-connection": lambda: self._on_new_connection(None, None),
+            "search-terminal": lambda: self._on_search_terminal(None, None),
+            "preferences": lambda: self._on_preferences(None, None),
+            "next-tab": lambda: self.terminal_panel.next_tab(),
+            "prev-tab": lambda: self.terminal_panel.prev_tab(),
+            "snippets": lambda: self._on_show_snippets(),
+            "split-left": lambda: self.terminal_panel.split_directional("left"),
+            "split-right": lambda: self.terminal_panel.split_directional("right"),
+            "split-up": lambda: self.terminal_panel.split_directional("up"),
+            "split-down": lambda: self.terminal_panel.split_directional("down"),
+            "toggle-sidebar": lambda: self._on_toggle_sidebar(None, None),
+            "snippets-alt": lambda: self._on_show_snippets(),
+        }
+        fn = mapping.get(action)
+        if not fn:
+            return False
+        fn()
+        return True
+
+    def _clear_hotkey_pending(self):
+        """Clear pending first chord state."""
+        self._hotkey_pending_first = None
+        if self._hotkey_pending_timeout_id:
+            GLib.source_remove(self._hotkey_pending_timeout_id)
+            self._hotkey_pending_timeout_id = 0
+
+    def _set_hotkey_pending(self, token: str):
+        """Remember first chord and auto-clear after timeout."""
+        self._clear_hotkey_pending()
+        self._hotkey_pending_first = token
+        self._hotkey_pending_timeout_id = GLib.timeout_add(
+            1600, self._on_hotkey_pending_timeout
+        )
+
+    def _on_hotkey_pending_timeout(self):
+        self._clear_hotkey_pending()
+        return False
+
+    def _handle_custom_hotkeys(self, keyval, state) -> bool:
+        """Handle user-configurable single and multi-chord shortcuts."""
+        token = self._key_to_token(keyval, state)
+        if not token:
+            return False
+
+        hotkeys = self._resolve_hotkeys()
+        matched_first = False
+
+        if self._hotkey_pending_first:
+            for action, seq in hotkeys.items():
+                parts = [p for p in seq.split(" ") if p]
+                if (
+                    len(parts) >= 2
+                    and parts[0] == self._hotkey_pending_first
+                    and parts[1] == token
+                ):
+                    self._clear_hotkey_pending()
+                    return self._invoke_hotkey_action(action)
+            self._clear_hotkey_pending()
+
+        for action, seq in hotkeys.items():
+            parts = [p for p in seq.split(" ") if p]
+            if len(parts) == 1 and parts[0] == token:
+                return self._invoke_hotkey_action(action)
+            if len(parts) >= 2 and parts[0] == token:
+                matched_first = True
+
+        if matched_first:
+            self._set_hotkey_pending(token)
             return True
 
-        # Ctrl+Shift shortcuts
-        if ctrl and shift:
-            if keyval == Gdk.KEY_T:
-                self.open_local_terminal()
-                return True
-            elif keyval == Gdk.KEY_N:
-                self._on_new_connection(None, None)
-                return True
-            elif keyval == Gdk.KEY_D:
-                self.terminal_panel.clone_current_tab()
-                return True
-            elif keyval == Gdk.KEY_Left:
-                self.terminal_panel.split_directional("left")
-                return True
-            elif keyval == Gdk.KEY_Right:
-                self.terminal_panel.split_directional("right")
-                return True
-            elif keyval == Gdk.KEY_Up:
-                self.terminal_panel.split_directional("up")
-                return True
-            elif keyval == Gdk.KEY_Down:
-                self.terminal_panel.split_directional("down")
-                return True
-            elif keyval == Gdk.KEY_S:
-                self._on_show_snippets()
-                return True
-            elif keyval == Gdk.KEY_V:
-                # Note: Ctrl+Shift+V is paste in the terminal.
-                pass
+        return False
 
-        # Ctrl+W: Close tab
-        if ctrl and keyval == Gdk.KEY_w:
-            self.terminal_panel.close_current_tab()
+    def _on_key_pressed(self, controller, keyval, keycode, state):
+        """Handle global keyboard shortcuts, including configurable chords."""
+        if self._handle_custom_hotkeys(keyval, state):
             return True
 
-        # Ctrl+Tab / Ctrl+Shift+Tab: Next/Prev tab
-        if ctrl and keyval == Gdk.KEY_Tab:
-            if shift:
-                self.terminal_panel.prev_tab()
-            else:
-                self.terminal_panel.next_tab()
-            return True
-
-        # Ctrl+F: Search
-        if ctrl and keyval == Gdk.KEY_f:
-            self._on_search_terminal(None, None)
-            return True
-
-        # Alt+1-9: Switch to tab by number
-        if alt:
+        # Keep Alt+1..9 quick tab switching as a fixed convenience shortcut.
+        if state & Gdk.ModifierType.ALT_MASK:
             num = keyval - Gdk.KEY_1
             if 0 <= num <= 8:
                 self.terminal_panel.switch_to_tab(num)
@@ -1931,10 +2232,37 @@ class MainWindow(Adw.ApplicationWindow):
                 _idx = idx
 
                 def _on_del(b, i=_idx):
-                    self.snippet_manager.delete_snippet(i)
-                    all_snippets.clear()
-                    all_snippets.extend(self.snippet_manager.get_snippets())
-                    _build_rows(search_entry.get_text())
+                    snippet_name = (
+                        all_snippets[i].name if i < len(all_snippets) else "snippet"
+                    )
+                    if not self.config.get("confirm_delete_snippet", True):
+                        self.snippet_manager.delete_snippet(i)
+                        all_snippets.clear()
+                        all_snippets.extend(self.snippet_manager.get_snippets())
+                        _build_rows(search_entry.get_text())
+                        return
+
+                    confirm = Adw.MessageDialog(
+                        transient_for=dialog,
+                        heading="Delete Snippet?",
+                        body=f'Are you sure you want to delete "{snippet_name}"?',
+                    )
+                    confirm.add_response("cancel", "Cancel")
+                    confirm.add_response("delete", "Delete")
+                    confirm.set_response_appearance(
+                        "delete", Adw.ResponseAppearance.DESTRUCTIVE
+                    )
+
+                    def _on_confirm(_d, response):
+                        if response != "delete":
+                            return
+                        self.snippet_manager.delete_snippet(i)
+                        all_snippets.clear()
+                        all_snippets.extend(self.snippet_manager.get_snippets())
+                        _build_rows(search_entry.get_text())
+
+                    confirm.connect("response", _on_confirm)
+                    confirm.present()
 
                 btn_del.connect("clicked", _on_del)
                 row.append(btn_del)
@@ -2440,8 +2768,12 @@ class MainWindow(Adw.ApplicationWindow):
         terminal = self.terminal_panel.focused_terminal
         if terminal is None:
             return
+        selected_only = bool(terminal.vte.get_has_selection())
         terminal.screenshot_selection_to_clipboard()
-        self._set_status("📷 Screenshot copied to clipboard")
+        if selected_only:
+            self._set_status("📷 Screenshot of selected area copied to clipboard")
+        else:
+            self._set_status("📷 Screenshot of current terminal content copied")
 
     def _on_ai_button_toggled(self, button):
         """Handle AI toggle button in header bar."""
@@ -2585,6 +2917,46 @@ class MainWindow(Adw.ApplicationWindow):
 
         def insert_mono(text):
             buf.insert_with_tags_by_name(buf.get_end_iter(), text + "\n", "mono")
+
+        guide_path = self._resolve_user_guide_path()
+        try:
+            with open(guide_path, "r", encoding="utf-8") as f:
+                guide_lines = f.readlines()
+        except OSError as exc:
+            guide_lines = [
+                "# SSH Client Manager — Usage Guide\n",
+                f"Could not read USER_GUIDE.md: {exc}\n",
+            ]
+
+        in_code = False
+        for raw in guide_lines:
+            line = raw.rstrip("\n")
+            stripped = line.strip()
+
+            if stripped.startswith("```"):
+                in_code = not in_code
+                continue
+
+            if in_code:
+                insert_mono(line)
+                continue
+
+            if stripped.startswith("### "):
+                insert_h3(stripped[4:])
+            elif stripped.startswith("## "):
+                insert_h2(stripped[3:])
+            elif stripped.startswith("# "):
+                insert_h1(stripped[2:])
+            elif stripped.startswith("|"):
+                insert_mono(line)
+            else:
+                insert_body(line)
+
+        scrolled.set_child(text_view)
+        main_box.append(scrolled)
+        dialog.set_content(main_box)
+        dialog.present()
+        return
 
         # Build the guide content
         insert_h1("SSH Client Manager — Usage Guide")
@@ -2753,7 +3125,9 @@ class MainWindow(Adw.ApplicationWindow):
             "• Also available via right-click a terminal → Start / Stop Recording"
         )
         insert_body("• The button turns red while recording; the tab title shows [REC]")
-        insert_body("• Recordings are saved in asciicast v2 format (.cast files)")
+        insert_body(
+            "• Recordings are saved in asciicast v2 format (.cast files) with ANSI color/style preserved"
+        )
         insert_body(
             "• The tab title shows [REC] while recording; the status bar shows the output file path"
         )
@@ -2762,8 +3136,12 @@ class MainWindow(Adw.ApplicationWindow):
         )
         insert_body("• The directory is created automatically if it doesn't exist")
         insert_body("• View and replay past recordings via Menu → Session Recordings")
+        insert_body("• Recording list supports Rename for existing session records")
         insert_body(
             "• Built-in player with Play/Pause, Restart, and speed control (0.5x–8x)"
+        )
+        insert_body(
+            "• Export GIF from any recording for easy sharing (requires agg; can install via Homebrew when prompted)"
         )
         insert_body(
             "• Open external .cast files via the Open button in the recordings dialog"
@@ -2838,7 +3216,10 @@ class MainWindow(Adw.ApplicationWindow):
 
         insert_h2("Terminal Screenshot")
         insert_body(
-            "• Right-click a terminal → Copy Screenshot of Selection, or use the context menu"
+            "• Right-click a terminal → Copy Screenshot (same menu action for selection/full capture)"
+        )
+        insert_body(
+            "• If text is selected, screenshot captures only the selected area; otherwise it captures all currently visible terminal content"
         )
         insert_body(
             "• Screenshots preserve terminal ANSI colours by parsing VTE HTML export for per-character colour information, then rendering with Cairo/PangoCairo"
@@ -2978,9 +3359,59 @@ class MainWindow(Adw.ApplicationWindow):
     # =====================================================================
 
     def _open_initial_terminal(self):
-        """Open an initial local terminal."""
-        self.open_local_terminal()
+        """Open initial tabs, restoring previous session when enabled."""
+        restored = self._restore_open_tabs_state()
+        if not restored:
+            self.open_local_terminal()
         return False
+
+    def _save_open_tabs_state(self):
+        """Persist currently open tabs for next startup restore."""
+        if not self.config.get("persist_open_tabs", True):
+            return
+
+        tabs = []
+        for terminal in self.terminal_panel.get_all_terminals():
+            conn = self.terminal_panel.get_terminal_connection(terminal)
+            title = self.terminal_panel.get_tab_title(terminal) or (
+                conn.name if conn else "Local"
+            )
+            if conn:
+                tabs.append(
+                    {
+                        "type": "connection",
+                        "connection_id": conn.id,
+                        "title": title,
+                    }
+                )
+            else:
+                tabs.append({"type": "local", "title": title})
+        self.config.set("last_open_tabs", tabs)
+
+    def _restore_open_tabs_state(self) -> bool:
+        """Restore tabs from previous run if enabled."""
+        if not self.config.get("restore_tabs_on_startup", True):
+            return False
+        tabs = self.config.get("last_open_tabs", []) or []
+        restored_any = False
+        for state in tabs:
+            restored_any = self._restore_tab_from_state(state) or restored_any
+        return restored_any
+
+    def _restore_tab_from_state(self, state: dict) -> bool:
+        """Restore one tab from serialized state."""
+        tab_type = state.get("type", "local")
+        if tab_type == "connection":
+            conn_id = state.get("connection_id", "")
+            if not conn_id:
+                return False
+            if not self.connection_manager.get_connection(conn_id):
+                return False
+            self.open_connection(conn_id)
+            return True
+
+        self.open_local_terminal()
+        return True
 
     @staticmethod
     def _parse_host_port(host_str: str, default_port: int = 22) -> tuple:
@@ -3017,6 +3448,28 @@ class MainWindow(Adw.ApplicationWindow):
                 return (host_str, default_port)
         else:
             return (host_str, default_port)
+
+    @staticmethod
+    def _resolve_user_guide_path() -> Path:
+        """Resolve USER_GUIDE.md path in dev and packaged app layouts."""
+        candidates = [
+            Path(__file__).resolve().parent.parent / "USER_GUIDE.md",
+            Path(__file__).resolve().parent / "USER_GUIDE.md",
+            Path.cwd() / "USER_GUIDE.md",
+        ]
+
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            candidates.append(Path(meipass) / "USER_GUIDE.md")
+
+        exe = Path(sys.executable).resolve()
+        candidates.append(exe.parent.parent / "Resources" / "USER_GUIDE.md")
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+        return candidates[0]
 
     def _on_quick_connect(self, entry):
         """Handle Quick Connect entry activation."""
@@ -3094,22 +3547,9 @@ class MainWindow(Adw.ApplicationWindow):
             self.terminal_panel.add_tab(terminal, conn, conn.name)
             terminal.spawn_command(vnc_cmd)
         elif proto == "sftp":
-            terminal = TerminalWidget(self.config, conn)
-            sftp_cmd = self.ssh_handler.build_sftp_command(conn)
-            env, session_id = self.ssh_handler.build_environment(conn)
-            terminal._askpass_session_id = session_id
-            self.terminal_panel.add_tab(terminal, conn, conn.name)
-            terminal.spawn_command(sftp_cmd, env)
-            # Track as SFTP terminal and show browser
-            self._sftp_terminals[id(terminal)] = conn
-            self.sidebar.show_sftp_browser(conn, self.credential_store)
+            self._open_sftp_connection(conn)
         else:
-            terminal = TerminalWidget(self.config, conn)
-            ssh_cmd = self.ssh_handler.build_ssh_command(conn)
-            env, session_id = self.ssh_handler.build_environment(conn)
-            terminal._askpass_session_id = session_id
-            self.terminal_panel.add_tab(terminal, conn, conn.name)
-            terminal.spawn_command(ssh_cmd, env)
+            self._open_ssh_connection(conn)
 
         entry.set_text("")
         self._set_status(f"Quick Connect: {conn.name}")
@@ -3139,6 +3579,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_close_request(self, window):
         """Handle window close request."""
+        self._save_open_tabs_state()
         # Save window state
         self.config.batch_update(
             {
