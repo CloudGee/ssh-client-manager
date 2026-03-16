@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import concurrent.futures
 from pathlib import Path
 import gi
 
@@ -93,6 +94,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._hotkey_pending_first: str | None = None
         self._hotkey_pending_timeout_id = 0
         self._shutdown_cleanup_done = False
+        self._busy_indicator_count = 0
 
         self._setup_actions()
         self._build_ui()
@@ -252,6 +254,9 @@ class MainWindow(Adw.ApplicationWindow):
         self.status_bar.set_margin_end(8)
         self.status_bar.set_margin_top(2)
         self.status_bar.set_margin_bottom(2)
+        self.status_spinner = Gtk.Spinner()
+        self.status_spinner.set_visible(False)
+        self.status_bar.append(self.status_spinner)
         self.status_label = Gtk.Label(label="Ready")
         self.status_label.set_xalign(0)
         self.status_label.add_css_class("dim-label")
@@ -746,6 +751,8 @@ class MainWindow(Adw.ApplicationWindow):
         def _finish_after_scan(
             keys_to_append: list[str], failed: list[tuple[str, str, bool]]
         ) -> bool:
+            self._set_busy(False)
+            self._dismiss_hostkey_loading()
             try:
                 if keys_to_append:
                     with open(known_hosts, "a", encoding="utf-8") as f:
@@ -806,12 +813,12 @@ class MainWindow(Adw.ApplicationWindow):
         def _scan_worker():
             keys_to_append: list[str] = []
             failed: list[tuple[str, str, bool]] = []
-            try:
-                ssh_dir.mkdir(mode=0o700, exist_ok=True)
-                known_hosts.touch(mode=0o600, exist_ok=True)
 
-                for host, port, required in pending:
-                    lookup = self._known_hosts_lookup_token(host, port)
+            def _scan_single(
+                host: str, port: int, required: bool
+            ) -> tuple[str | None, tuple[str, str, bool] | None]:
+                lookup = self._known_hosts_lookup_token(host, port)
+                try:
                     if replace_existing:
                         subprocess.run(
                             ["ssh-keygen", "-R", host, "-f", str(known_hosts)],
@@ -825,7 +832,7 @@ class MainWindow(Adw.ApplicationWindow):
                         )
 
                     scan = subprocess.run(
-                        ["ssh-keyscan", "-T", "3", "-p", str(port), host],
+                        ["ssh-keyscan", "-T", "2", "-p", str(port), host],
                         capture_output=True,
                         text=True,
                     )
@@ -834,9 +841,29 @@ class MainWindow(Adw.ApplicationWindow):
                         err = (
                             scan.stderr or scan.stdout or "Failed to fetch host key"
                         ).strip()
-                        failed.append((lookup, err, required))
-                        continue
-                    keys_to_append.append(key_text)
+                        return None, (lookup, err, required)
+                    return key_text, None
+                except OSError as exc:
+                    return None, (lookup, str(exc), required)
+
+            try:
+                ssh_dir.mkdir(mode=0o700, exist_ok=True)
+                known_hosts.touch(mode=0o600, exist_ok=True)
+
+                max_workers = min(4, max(1, len(pending)))
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=max_workers
+                ) as executor:
+                    futures = [
+                        executor.submit(_scan_single, host, port, required)
+                        for host, port, required in pending
+                    ]
+                    for fut in concurrent.futures.as_completed(futures):
+                        key_text, failure = fut.result()
+                        if key_text:
+                            keys_to_append.append(key_text)
+                        if failure:
+                            failed.append(failure)
             except OSError as exc:
                 failed.append(("known_hosts", str(exc), True))
 
@@ -845,7 +872,8 @@ class MainWindow(Adw.ApplicationWindow):
         def _on_response(_d, response):
             if response != "accept":
                 return
-            self._set_status("Fetching host keys...")
+            self._set_busy(True, "Fetching host keys...")
+            self._show_hostkey_loading()
             threading.Thread(target=_scan_worker, daemon=True).start()
 
         dialog.connect("response", _on_response)
@@ -3828,6 +3856,56 @@ class MainWindow(Adw.ApplicationWindow):
     def _set_status(self, text: str):
         """Update the status bar text."""
         self.status_label.set_text(text)
+
+    def _set_busy(self, busy: bool, status_text: str | None = None):
+        """Toggle status bar spinner for long-running background work."""
+        if busy:
+            self._busy_indicator_count += 1
+        else:
+            self._busy_indicator_count = max(0, self._busy_indicator_count - 1)
+
+        is_busy = self._busy_indicator_count > 0
+        self.status_spinner.set_visible(is_busy)
+        if is_busy:
+            self.status_spinner.start()
+        else:
+            self.status_spinner.stop()
+
+        if status_text:
+            self._set_status(status_text)
+
+    # ── Host-key loading dialog ──────────────────────────────────────────
+
+    def _show_hostkey_loading(self):
+        """Show a loading dialog while host keys are being fetched."""
+        if getattr(self, "_hostkey_loading_dialog", None) is not None:
+            return
+
+        dlg = Adw.MessageDialog(
+            transient_for=self,
+            heading="Verifying Host Key…",
+            body="Fetching and validating server fingerprint",
+        )
+        spinner = Gtk.Spinner()
+        spinner.set_size_request(48, 48)
+        spinner.start()
+        spinner.set_halign(Gtk.Align.CENTER)
+        spinner.set_margin_top(8)
+        spinner.set_margin_bottom(8)
+        dlg.set_extra_child(spinner)
+        dlg.present()
+        self._hostkey_loading_dialog = dlg
+
+    def _dismiss_hostkey_loading(self):
+        """Close the host-key loading dialog."""
+        dlg = getattr(self, "_hostkey_loading_dialog", None)
+        if dlg is None:
+            return
+        try:
+            dlg.close()
+        except Exception:
+            pass
+        self._hostkey_loading_dialog = None
 
     def _update_tab_count(self):
         """Update the tab count display."""

@@ -63,6 +63,7 @@
 - **Bracketed Paste:** pasted text is wrapped in bracketed-paste mode to reduce shell auto-execution surprises
 - **Tab completion stability:** single and double `Tab` (including `Shift+Tab`) are passed directly to the shell when terminal input is focused, so completion/menu behavior matches a native terminal
 - **Unicode prompt rendering stability:** terminal sessions force a UTF-8 locale fallback (`LANG/LC_CTYPE`) to avoid redraw offsets with icon/emoji prompts during completion
+- **Trackpad selection behavior (macOS):** click-drag to select text works normally. Once you release the click (reduce trackpad pressure), the selection is immediately frozen — it will not follow the cursor even if your finger is still touching the trackpad. A new click starts a fresh interaction.
 
 ### Persistent Tabs
 
@@ -87,8 +88,15 @@
 - After accepting, connection is retried automatically
 - For ProxyCommand/ProxyJump chains, the app verifies jump/proxy hosts first and then the final host
 - Host key prefetch now runs in background (non-blocking), so the verification dialog no longer freezes the UI
+- During host key prefetch, a prominent loading dialog with spinner is shown so the verification progress is clearly visible
+- Multi-target host key scans now run in parallel with a shorter scan timeout, reducing first-connect wait time across jump/proxy chains
 - If a proxied final host cannot be reached directly by `ssh-keyscan`, the app can continue and let OpenSSH perform interactive host-key verification during connection
 - In credential-injection sessions (SSH_ASKPASS), when prefetch is incomplete, the next connect attempt uses one-shot `StrictHostKeyChecking=accept-new` to avoid repeated host-key failure loops
+
+### Credential Fallback
+
+- Auto credential injection still tries connection passphrases, global passphrases, and stored password first
+- If all automatic attempts fail, the app now falls back to manual input (terminal prompt when available, macOS secure dialog fallback), so connection attempts do not fail immediately due to bad saved credentials
 
 ### Customizable Hotkeys
 

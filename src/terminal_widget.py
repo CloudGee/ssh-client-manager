@@ -87,6 +87,30 @@ class TerminalWidget(Gtk.Box):
         mid_click.connect("pressed", self._on_middle_click)
         self.vte.add_controller(mid_click)
 
+        # On macOS trackpads, VTE has a bug: its gesture_click_stopped()
+        # handler is empty (FIXME in source), so when the trackpad click
+        # releases mid-drag (pressure drops), widget_mouse_release() is
+        # never called and VTE's internal m_selecting flag stays TRUE.
+        # This causes selection to follow the cursor after the user has
+        # already stopped pressing.
+        #
+        # Fix: Use EventControllerLegacy at CAPTURE phase to track the
+        # full press→drag→release lifecycle via a 4-state machine:
+        #   IDLE → PRESSING → DRAGGING → POST_DRAG → (back to IDLE on press)
+        # After drag ends (BUTTON_RELEASE or BUTTON1_MASK disappears from
+        # motion events), consume ALL motion events until a new BUTTON_PRESS
+        # starts a fresh interaction.  This prevents VTE's stale m_selecting
+        # from extending the selection.
+        sel_legacy = Gtk.EventControllerLegacy()
+        sel_legacy.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        sel_legacy.connect("event", self._on_selection_guard_event)
+        self.vte.add_controller(sel_legacy)
+
+        # Selection guard state machine
+        self._sel_state = "IDLE"  # IDLE | PRESSING | DRAGGING | POST_DRAG
+        self._drag_start_x = 0.0
+        self._drag_start_y = 0.0
+
         # Right-click menu
         self._setup_context_menu()
 
@@ -768,6 +792,99 @@ class TerminalWidget(Gtk.Box):
         else:
             self.paste_clipboard()
         gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+
+    def _on_selection_guard_event(self, controller, event):
+        """Prevent stale VTE selection drag on macOS trackpad.
+
+        VTE's GtkGestureClick.stopped handler is a no-op (FIXME in VTE
+        source), so when the trackpad un-clicks mid-drag, VTE's internal
+        m_selecting flag stays TRUE and selection keeps following the
+        cursor.  This handler works around it with a state machine:
+
+        IDLE       → BUTTON_PRESS  → PRESSING   (allow VTE to see press)
+        PRESSING   → MOTION >3px   → DRAGGING   (allow VTE to drag-select)
+        DRAGGING   → BUTTON_RELEASE or
+                     BUTTON1_MASK gone
+                                   → POST_DRAG  (consume all motion)
+        POST_DRAG  → BUTTON_PRESS  → PRESSING   (fresh click cycle)
+        POST_DRAG  → MOTION        → consumed   (block stale VTE selection)
+        """
+        etype = event.get_event_type()
+
+        # ── Button press ────────────────────────────────────────────
+        if etype == Gdk.EventType.BUTTON_PRESS:
+            try:
+                if event.get_button() != 1:
+                    return False
+            except Exception:
+                return False
+            self._sel_state = "PRESSING"
+            try:
+                _, self._drag_start_x, self._drag_start_y = event.get_position()
+            except Exception:
+                self._drag_start_x = 0.0
+                self._drag_start_y = 0.0
+            return False  # let VTE see the press
+
+        # ── Button release ──────────────────────────────────────────
+        if etype == Gdk.EventType.BUTTON_RELEASE:
+            try:
+                if event.get_button() != 1:
+                    return False
+            except Exception:
+                return False
+            if self._sel_state == "DRAGGING":
+                self._sel_state = "POST_DRAG"
+            elif self._sel_state != "POST_DRAG":
+                self._sel_state = "IDLE"
+            return False  # let VTE see the release
+
+        # ── Motion ──────────────────────────────────────────────────
+        if etype == Gdk.EventType.MOTION_NOTIFY:
+            state = event.get_modifier_state()
+            has_btn1 = bool(state & Gdk.ModifierType.BUTTON1_MASK)
+
+            if self._sel_state == "IDLE":
+                if has_btn1:
+                    # BUTTON_PRESS was missed (stale drag) → consume
+                    return True
+                return False
+
+            if self._sel_state == "POST_DRAG":
+                if has_btn1:
+                    # Button still registered but drag already ended → consume
+                    return True
+                # No button — consume to prevent VTE stale m_selecting
+                # from extending selection.  Will reset on next BUTTON_PRESS.
+                return True
+
+            if self._sel_state == "PRESSING":
+                if not has_btn1:
+                    # Button released before drag started → go idle
+                    self._sel_state = "IDLE"
+                    return False
+                # Apply 3-pixel drag threshold
+                try:
+                    _, mx, my = event.get_position()
+                except Exception:
+                    return False
+                dx = mx - self._drag_start_x
+                dy = my - self._drag_start_y
+                if (dx * dx + dy * dy) < 9:
+                    return True  # consume micro-movements
+                self._sel_state = "DRAGGING"
+                return False  # let VTE start selection
+
+            if self._sel_state == "DRAGGING":
+                if not has_btn1:
+                    # Button released mid-drag (trackpad pressure drop).
+                    # VTE won't get widget_mouse_release() due to its bug,
+                    # so m_selecting stays TRUE.  Block all further motion.
+                    self._sel_state = "POST_DRAG"
+                    return True
+                return False  # let VTE extend selection normally
+
+        return False
 
     def _on_key_pressed(self, controller, keyval, keycode, state):
         """Handle keyboard shortcuts including macOS Cmd+C/V."""

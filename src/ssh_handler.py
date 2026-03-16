@@ -231,6 +231,34 @@ class SSHHandler:
             f'COUNTER_FILE="{counter_file}"',
             f'PROMPT_FILE="{prompt_file}"',
             "",
+            "prompt_fallback() {",
+            '    local USER_INPUT=""',
+            "",
+            "    # macOS GUI fallback for force-askpass sessions.",
+            "    if [ -x /usr/bin/osascript ]; then",
+            '        USER_INPUT=$(SSHCM_PROMPT="$PROMPT" /usr/bin/osascript -e \'tell application "System Events" to display dialog (system attribute "SSHCM_PROMPT") default answer "" with hidden answer buttons {"Cancel","OK"} default button "OK"\' -e \'text returned of result\' 2>/dev/null)',
+            '        if [ $? -eq 0 ] && [ -n "$USER_INPUT" ]; then',
+            '            echo "$USER_INPUT"',
+            "            exit 0",
+            "        fi",
+            "    fi",
+            "",
+            "    # Terminal fallback if a controlling TTY exists.",
+            "    if [ -r /dev/tty ] && [ -w /dev/tty ]; then",
+            '        printf "%s " "$PROMPT" > /dev/tty',
+            "        stty -echo < /dev/tty",
+            "        IFS= read -r USER_INPUT < /dev/tty",
+            "        stty echo < /dev/tty",
+            '        printf "\\n" > /dev/tty',
+            '        if [ -n "$USER_INPUT" ]; then',
+            '            echo "$USER_INPUT"',
+            "            exit 0",
+            "        fi",
+            "    fi",
+            "",
+            "    exit 1",
+            "}",
+            "",
             "# --- passphrase prompt ---",
             'if echo "$PROMPT" | grep -qi "passphrase"; then',
         ]
@@ -255,21 +283,25 @@ class SSHHandler:
                 script_lines.append(
                     f'        {i}) echo "{self._escape_for_shell(pp)}" ;;'
                 )
-            # Beyond stored count, exit 1 so SSH falls back to interactive
-            script_lines.append("        *) exit 1 ;;")
+            # Beyond stored count, ask user manually.
+            script_lines.append("        *) prompt_fallback ;;")
             script_lines.append("    esac")
         else:
-            # No passphrase stored → fail so SSH falls back to interactive
-            script_lines.append("    exit 1")
+            # No passphrase stored → prompt user directly.
+            script_lines.append("    prompt_fallback")
 
         # --- password prompt ---
         script_lines.append('elif echo "$PROMPT" | grep -qi "password"; then')
+        password_candidates: list[str] = []
         if password:
-            script_lines.append(f'    echo "{self._escape_for_shell(password)}"')
-        elif passphrases:
-            # No stored password — try passphrases as fallback for password prompts
-            # Use a separate counter file so passphrase and password prompt
-            # counters don't interfere with each other.
+            password_candidates.append(password)
+        for pp in passphrases:
+            if pp not in password_candidates:
+                password_candidates.append(pp)
+
+        if password_candidates:
+            # Use a separate counter so password and passphrase prompt retries
+            # are tracked independently.
             pw_counter = f"{self._askpass_dir}/.askpass-pw-counter-{session_id}"
             pw_prompt = f"{self._askpass_dir}/.askpass-pw-prompt-{session_id}"
             script_lines.extend(
@@ -287,14 +319,14 @@ class SSHHandler:
                     "    case $PW_COUNT in",
                 ]
             )
-            for i, pp in enumerate(passphrases, 1):
+            for i, candidate in enumerate(password_candidates, 1):
                 script_lines.append(
-                    f'        {i}) echo "{self._escape_for_shell(pp)}" ;;'
+                    f'        {i}) echo "{self._escape_for_shell(candidate)}" ;;'
                 )
-            script_lines.append("        *) exit 1 ;;")
+            script_lines.append("        *) prompt_fallback ;;")
             script_lines.append("    esac")
         else:
-            script_lines.append("    exit 1")
+            script_lines.append("    prompt_fallback")
 
         # --- anything else → don't guess ---
         script_lines.extend(
